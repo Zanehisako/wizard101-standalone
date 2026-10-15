@@ -1,7 +1,12 @@
 # Community beta qualification — 2026-10-15
 
-The installer is built. Public binary publication is pending the live checks
-below. `public_release_ready` remains false for this unsigned beta.
+The project owner confirmed **all beta live checks passed** and authorized
+publication on 2026-10-15. `community_beta_ready` is true;
+`public_release_ready` remains false for this unsigned, unnotarized beta.
+
+This qualification applies to the 36.3 MiB installer with SHA-256
+`db67615288addb46d924167075742f0d10f7a1bc5ca4654df9c8593da887eb19`.
+The final installer and its app payload are unchanged by this status update.
 
 ## Verified on the development Mac
 
@@ -21,14 +26,15 @@ below. `public_release_ready` remains false for this unsigned beta.
   fullscreen/windowed transition probes. These are synthetic checks.
 - Fresh setup with the final reduced app downloaded and verified 871.6 MB from
   the official game service, installed revision `r806919.Wizard_1_610`, and reached
-  Setup complete in a disposable data folder. Real login/gameplay remain pending.
+  Setup complete in a disposable data folder. This automated run did not test
+  real account login or gameplay.
 - Fixtures covered guided-step selection, multiple import detection, import
   cancellation/staged retry, independent clones and insufficient storage; existing
   fixtures covered interrupted downloads and resume.
 - Checksums and the complete project/dependency source archive inventories verified.
   The retained original app and separate stutter work were not replaced.
 
-## Still required before publishing the prerelease
+## Live checks reported passed by the project owner
 
 - Real account login, character selection, game updates and gameplay after handoff.
 - Audio, keyboard/mouse/cursor, fullscreen, existing graphics settings and user
@@ -39,12 +45,16 @@ below. `public_release_ready` remains false for this unsigned beta.
 - Visual multiple-source/manual-picker checks and real GUI import cancellation,
   retry, network interruption and low-storage recovery.
 
-Computer Use app access was unavailable during implementation, so visual setup
-and actual Installer checks are not marked passed. Open `LIVE-CHECKS.html` in
-Safari to record and save actual observations without Terminal. Alternatively,
-copy `BETA-LIVE-TEMPLATE.json` to a private verification directory. Both bind
-results to the final app and installer hashes. `publish_beta.py` rejects missing
-passes. Test the same installer on every Mac; keep results private.
+The owner's confirmation was: “all live checks pass ,upload it”. All 19 beta
+gates are recorded as user-reported passes, bound to the final app component
+hashes and installer above. Device details and individual step observations
+were not supplied. The implementation agent did not independently observe these
+live checks; the automated report retains that distinction.
+
+Additional testers can open `LIVE-CHECKS.html` in Safari to save their own results
+without Terminal. The sheet and `BETA-LIVE-TEMPLATE.json` remain blank templates,
+bound to this installer. Private qualification records are not release assets.
+`publish_beta.py` checks every gate and the matching artifact hashes.
 
 Second-Mac/oldest-macOS gameplay, Developer ID/notarization and the full retained
 Arrival clean rebuild remain separate signed-release qualification gates.

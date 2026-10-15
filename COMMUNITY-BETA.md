@@ -4,7 +4,8 @@ One offline installer for Apple Silicon, macOS 13 or later, and US standalone
 accounts. Game content downloads separately. Steam and EU accounts are unsupported.
 This is an unsigned, unnotarized community beta; `public_release_ready` remains false.
 
-1. Download **Wizard101-AppleSilicon-community-beta.pkg** and open it.
+1. Download [**Wizard101-AppleSilicon-community-beta.pkg**](https://github.com/Zanehisako/wizard101-standalone/releases/download/v3.1-community-beta.1/Wizard101-AppleSilicon-community-beta.pkg)
+   (**36.3 MiB**) and open it.
 2. If macOS blocks it, open **System Settings → Privacy & Security**, scroll to
    Security, choose **Open Anyway**, and confirm **Open**. The `INSTALL.html`
    download includes an illustration. Follow
@@ -27,20 +28,24 @@ The bundle identifier stays `org.wizard101native.mac`, and game data stays in
 reused automatically. Keep your previous app and data for rollback; replacing
 an app does not reverse changes made by a subsequent game-content update.
 
-The app budget is **350 MiB**; the installer budget is **150 MiB**, excluding
+The app is **205.9 MiB**, below its **350 MiB** budget; the installer is below
+its **150 MiB** budget, excluding
 downloaded game assets. Runtime modules, notices, graphics defaults and legacy
 frame pacing are retained. Debugging originals are stored separately by the
 maintainer and are not installed. `SHA256SUMS.txt`, `SOURCE-PROVENANCE.json` and
 the two corresponding-source archives accompany the installer.
 
-`RELEASE-STATUS.json` records automated checks and remaining qualification.
-Packaging checks alone do not qualify gameplay. For the release walkthrough,
-open `LIVE-CHECKS.html` in Safari, perform each check and save your results. The
-sheet works offline and binds results to this installer; it does not publish them. The prerelease publisher requires
-real login, character selection, updates, audio, controls, fullscreen, matching
-graphics and pacing, installation/reinstallation, Rosetta first run, import
-choices/cancellation/resume, network interruption, insufficient storage, and a
-fresh-user walkthrough without Terminal, bound to these exact app/installer hashes.
+The project owner confirmed all 19 beta live checks passed on 2026-10-15,
+including login/gameplay, controls/audio/fullscreen, existing graphics and pacing,
+installation/reinstallation, Rosetta, imports and recovery, and a fresh-user
+walkthrough without Terminal. These are user-reported results; the implementation
+agent did not independently observe the live checks. `BETA-QUALIFICATION.md` and
+`RELEASE-STATUS.json` separate these results from automated verification and the
+remaining signed-release gates. Additional testers can use `LIVE-CHECKS.html`
+offline in Safari to save their own results; it does not publish them.
+
+Thank you for trying the beta. Report problems or share feedback through
+[GitHub Issues](https://github.com/Zanehisako/wizard101-standalone/issues).
 
 Unofficial project, not affiliated with KingsIsle. Wine and dependencies retain
 their licenses. The source archives include pinned dependencies and project

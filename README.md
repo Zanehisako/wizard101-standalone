@@ -6,22 +6,25 @@ native launcher installs the game, checks updates and handles sign-in. Its UI
 uses official Wizard101 artwork fetched and cached separately, parchment panels,
 and optional animated effects.
 
-**Current status: test candidate.** There is no published notarized release on
-this repository yet. Apps and game files are generated locally, not stored in
-Git. Fresh setup, GUI cancel/resume, update checks, 49,352 launcher self-checks,
-92 Python tests and isolated graphics/cursor probes passed in the development
-workspace on 2026-10-07. These do not establish fresh real-account gameplay,
-performance acceptance, another Mac, or macOS 13 compatibility. See
-[release gates](RELEASE-GATES.md) and [shipping status](SHIPPING.md).
+**Current status: unsigned community beta.** Get the
+[installer and corresponding sources](https://github.com/Zanehisako/wizard101-standalone/releases/tag/v3.1-community-beta.1).
+The project owner confirmed all beta live checks passed on 2026-10-15.
+Automated verification includes 49,369 launcher self-checks, 99 Python tests,
+fresh official game setup and isolated graphics/cursor probes. See the
+[qualification record](BETA-QUALIFICATION.md) for the distinction between
+automated checks and user-reported live results. Apps and game files are generated
+locally. Developer ID signing, notarization, additional-Mac/oldest-macOS gameplay
+and a clean retained Arrival rebuild remain [signed-release gates](SHIPPING.md).
 
 ## Choose your setup path
 
 The smaller unsigned installer workflow is documented in
 [Community Beta](COMMUNITY-BETA.md). It installs **Wizard101 Standalone.app**,
 offers detected game imports and guided setup, and requires macOS Open Anyway
-approval. Its release status remains separate from the signed release gates. The app is
-205.9 MiB and the installer is 36.3 MiB; live qualification is pending. Maintainers
-can open the release’s `LIVE-CHECKS.html` to record observations without Terminal.
+approval. The app is 205.9 MiB and the installer is 36.3 MiB, excluding downloaded
+game content. `public_release_ready` remains false for this unsigned beta.
+Additional testers can open the release’s `LIVE-CHECKS.html` to record
+observations without Terminal.
 
 | What you have | What to do |
 | --- | --- |
