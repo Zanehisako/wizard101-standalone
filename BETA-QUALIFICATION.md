@@ -19,6 +19,9 @@ below. `public_release_ready` remains false for this unsigned beta.
 - The final reduced app's isolated Wine prefix passed rendering/upload readbacks,
   six texture formats, synthetic HUD, 64-pixel cursor/hotspot/transparency, and
   fullscreen/windowed transition probes. These are synthetic checks.
+- Fresh setup with the final reduced app downloaded and verified 871.6 MB from
+  the official game service, installed revision `r806919.Wizard_1_610`, and reached
+  Setup complete in a disposable data folder. Real login/gameplay remain pending.
 - Fixtures covered guided-step selection, multiple import detection, import
   cancellation/staged retry, independent clones and insufficient storage; existing
   fixtures covered interrupted downloads and resume.
@@ -37,9 +40,11 @@ below. `public_release_ready` remains false for this unsigned beta.
   retry, network interruption and low-storage recovery.
 
 Computer Use app access was unavailable during implementation, so visual setup
-and actual Installer checks are not marked passed. Copy `BETA-LIVE-TEMPLATE.json`
-to a private verification directory and record actual observations bound to the
-final app and installer hashes. `publish_beta.py` rejects missing passes.
+and actual Installer checks are not marked passed. Open `LIVE-CHECKS.html` in
+Safari to record and save actual observations without Terminal. Alternatively,
+copy `BETA-LIVE-TEMPLATE.json` to a private verification directory. Both bind
+results to the final app and installer hashes. `publish_beta.py` rejects missing
+passes. Test the same installer on every Mac; keep results private.
 
 Second-Mac/oldest-macOS gameplay, Developer ID/notarization and the full retained
 Arrival clean rebuild remain separate signed-release qualification gates.

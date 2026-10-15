@@ -19,7 +19,9 @@ performance acceptance, another Mac, or macOS 13 compatibility. See
 The smaller unsigned installer workflow is documented in
 [Community Beta](COMMUNITY-BETA.md). It installs **Wizard101 Standalone.app**,
 offers detected game imports and guided setup, and requires macOS Open Anyway
-approval. Its release status remains separate from the signed release gates.
+approval. Its release status remains separate from the signed release gates. The app is
+205.9 MiB and the installer is 36.3 MiB; live qualification is pending. Maintainers
+can open the release’s `LIVE-CHECKS.html` to record observations without Terminal.
 
 | What you have | What to do |
 | --- | --- |
@@ -171,8 +173,8 @@ For a new checkout:
 
 ```sh
 mkdir -p "$HOME/Developer"
-git clone https://github.com/Zanehisako/wizard101-graphics-patch.git "$HOME/Developer/wizard101-graphics-patch"
-cd "$HOME/Developer/wizard101-graphics-patch/portable"
+git clone https://github.com/Zanehisako/wizard101-standalone.git "$HOME/Developer/wizard101-standalone"
+cd "$HOME/Developer/wizard101-standalone"
 python3 build.py
 ```
 

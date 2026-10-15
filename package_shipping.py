@@ -274,6 +274,8 @@ def package(base, output, identity=None, notary_profile=None, live_evidence=None
                               'second Apple Silicon Mac', 'oldest supported macOS', 'clean Arrival source rebuild'])
             evidence = dict(components=hashes, installer_sha256=sha(dmg), gates=dict.fromkeys(BETA_LIVE_GATES, False), observations={})
             (artifacts / 'BETA-LIVE-TEMPLATE.json').write_text(json.dumps(evidence, indent=2) + '\n')
+            from live_checklist import write_checklist
+            write_checklist(artifacts / 'LIVE-CHECKS.html', evidence)
             shutil.copy2(ROOT / 'COMMUNITY-BETA.md', artifacts / 'COMMUNITY-BETA.md')
             shutil.copy2(ROOT / 'BETA-QUALIFICATION.md', artifacts / 'BETA-QUALIFICATION.md')
         if original_base is not None and components(Path(base)) != original_base: raise ValueError('Base app changed during packaging')

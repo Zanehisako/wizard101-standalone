@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wizard101 community beta live checks</title>
+<style>
+body{font:16px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;background:#fffaf0;color:#2b1e38;max-width:850px;margin:32px auto;padding:0 20px}
+h1{font-size:28px}h2{font-size:19px;margin:0}a{color:#56357c}section{border:1px solid #d7cddd;border-radius:12px;background:white;padding:18px;margin:18px 0}
+label{display:block;font-weight:600;margin:12px 0 4px}textarea,input[type=text]{box-sizing:border-box;width:100%;padding:10px;font:inherit;border:1px solid #8b8095;border-radius:6px}textarea{min-height:85px}
+input[type=checkbox]{width:20px;height:20px;vertical-align:middle;margin-right:8px}button{font:inherit;font-weight:600;background:#56357c;color:white;border:0;border-radius:8px;padding:12px 22px;cursor:pointer}button:focus,textarea:focus,input:focus{outline:3px solid #a88cc4;outline-offset:3px}
+code{overflow-wrap:anywhere;font-size:12px}small{color:#65576f}.save{position:sticky;bottom:0;background:#fffaf0;border-top:1px solid #d7cddd;padding:15px 0}#status{display:block;margin:8px 0}noscript{color:#a00020}
+</style>
+<h1>Wizard101 Standalone: live checks</h1>
+<p>Use the finished community beta installer for these checks. Follow <a href="INSTALL.html">the illustrated installation guide</a>. Keep your previous app and game data for rollback.</p>
+<p>Check a box only after observing success. Add a short note with the Mac model, macOS version and result. Leave untested or failed checks unchecked and describe what happened.</p>
+<p><small>This sheet works offline. Save results before closing it, then send the downloaded JSON to your maintainer. It does not upload anything. You can load saved results to continue on another Mac.</small></p>
+<p>Installer SHA-256: <code id="installer"></code></p>
+<label for="load">Continue from saved results</label><input type="file" id="load" accept=".json,application/json">
+<div id="checks"></div>
+<noscript>Enable JavaScript for this offline sheet, or use BETA-LIVE-TEMPLATE.json.</noscript>
+<div class="save"><span id="status" role="status" aria-live="polite"></span><button id="save" type="button">Save results</button></div>
+<script id="data" type="application/json">__W101_CHECK_DATA__</script>
+<script>
+'use strict';
+const data=JSON.parse(document.getElementById('data').textContent);
+const evidence=data.evidence, status=document.getElementById('status');
+document.getElementById('installer').textContent=evidence.installer_sha256;
+function update(){const count=Object.keys(data.checks).filter(key=>document.getElementById(key).checked&&document.getElementById(key+'-note').value.trim()).length;status.textContent=count+' of '+Object.keys(data.checks).length+' checks have a pass and observation.';}
+for(const [key,[title,instructions]] of Object.entries(data.checks)){
+ const section=document.createElement('section');
+ const heading=document.createElement('h2');heading.textContent=title;section.append(heading);
+ const description=document.createElement('p');description.textContent=instructions;section.append(description);
+ const label=document.createElement('label'), checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.id=key;label.append(checkbox,document.createTextNode('Observed success'));section.append(label);
+ const noteLabel=document.createElement('label');noteLabel.htmlFor=key+'-note';noteLabel.textContent='Observation';section.append(noteLabel);
+ const note=document.createElement('textarea');note.id=key+'-note';section.append(note);
+ checkbox.addEventListener('change',update);note.addEventListener('input',update);document.getElementById('checks').append(section);
+}
+document.getElementById('save').addEventListener('click',()=>{
+ const result=JSON.parse(JSON.stringify(evidence));result.observations={};
+ for(const key of Object.keys(data.checks)){
+  const note=document.getElementById(key+'-note').value.trim();
+  result.gates[key]=document.getElementById(key).checked&&Boolean(note);
+  if(note)result.observations[key]=note;
+ }
+ const url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)+'\n'],{type:'application/json'}));
+ const link=document.createElement('a');link.href=url;link.download='Wizard101-Beta-Live-Results.json';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);update();
+});
+document.getElementById('load').addEventListener('change',async event=>{
+ try{
+  const file=event.target.files[0];if(!file)return;const saved=JSON.parse(await file.text());
+  const left=Object.entries(saved.components||{}).sort(), right=Object.entries(evidence.components).sort();
+  if(saved.installer_sha256!==evidence.installer_sha256||JSON.stringify(left)!==JSON.stringify(right))throw new Error('These results belong to a different app or installer.');
+  for(const key of Object.keys(data.checks)){document.getElementById(key).checked=saved.gates?.[key]===true;document.getElementById(key+'-note').value=typeof saved.observations?.[key]==='string'?saved.observations[key]:'';}update();
+ }catch(error){status.textContent='Could not load results: '+error.message;}
+});
+update();
+</script>
+</html>

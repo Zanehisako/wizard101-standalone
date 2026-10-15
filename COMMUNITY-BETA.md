@@ -34,7 +34,9 @@ maintainer and are not installed. `SHA256SUMS.txt`, `SOURCE-PROVENANCE.json` and
 the two corresponding-source archives accompany the installer.
 
 `RELEASE-STATUS.json` records automated checks and remaining qualification.
-Packaging checks alone do not qualify gameplay. The prerelease publisher requires
+Packaging checks alone do not qualify gameplay. For the release walkthrough,
+open `LIVE-CHECKS.html` in Safari, perform each check and save your results. The
+sheet works offline and binds results to this installer; it does not publish them. The prerelease publisher requires
 real login, character selection, updates, audio, controls, fullscreen, matching
 graphics and pacing, installation/reinstallation, Rosetta first run, import
 choices/cancellation/resume, network interruption, insufficient storage, and a
