@@ -1,0 +1,20 @@
+name: Stage verified beta dependency sources
+on:
+  push:
+    branches: [beta-source-upload]
+permissions:
+  contents: write
+jobs:
+  sources:
+    if: github.repository == 'Zanehisako/wizard101-standalone'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Read this exact source revision
+        run: |
+          git clone --no-checkout "https://github.com/${GITHUB_REPOSITORY}.git" source
+          git -C source checkout --detach "$GITHUB_SHA"
+      - name: Reproduce and upload sources to the existing draft
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 source/.github/scripts/upload_dependency_sources.py --upload

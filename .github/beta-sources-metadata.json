@@ -1,0 +1,589 @@
+{
+  "repository": "Zanehisako/wizard101-standalone",
+  "release_id": 413968391,
+  "tag": "v3.1-community-beta.1",
+  "filename": "Wizard101-Dependency-Sources.tar.gz",
+  "sha256": "be08c66ca0cee0ffbfce1c16f4b0710ab33dbbc782124d5d85552cdc181e81ed",
+  "gzip_mtime": 1792077586,
+  "entries": [
+    {
+      "info": {
+        "name": "cache/GCC-Runtime-Library-Exception-3.1.txt",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 3324,
+        "mtime": 1792075939.8319283,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.8319283"
+        }
+      },
+      "source": {
+        "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
+        "url": "https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-16.2.0/COPYING.RUNTIME"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/GPL-3.0.txt",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 35147,
+        "mtime": 1792075939.833587,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.833587"
+        }
+      },
+      "source": {
+        "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+        "url": "https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-16.2.0/COPYING3"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/MoltenVK-v1.4.2.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 1260733,
+        "mtime": 1792075939.83707,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.83707"
+        }
+      },
+      "source": {
+        "sha256": "6864db532f1dbbdb621a8d0ec13f24edae318fd9269dd3dd0cdff791334bb1cb",
+        "url": "https://codeload.github.com/KhronosGroup/MoltenVK/tar.gz/refs/tags/v1.4.2"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/SPIRV-Cross-6c09849fe88c48eaed08413aa022aaa136a3a057.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 2007157,
+        "mtime": 1792075939.844481,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.844481"
+        }
+      },
+      "source": {
+        "sha256": "b81b9956289950570953738e666a031ca32ff64e4fc925eba89f227c42109518",
+        "url": "https://codeload.github.com/KhronosGroup/SPIRV-Cross/tar.gz/6c09849fe88c48eaed08413aa022aaa136a3a057"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/SPIRV-Headers-0bcc624926a25a2a273d07877fd25a6ff5ba1cfb.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 437771,
+        "mtime": 1792075939.846053,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.846053"
+        }
+      },
+      "source": {
+        "sha256": "1391df5e90bed48c52b3550f34bec5e5c823f7602161dc849cc593da9c97e80d",
+        "url": "https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/0bcc624926a25a2a273d07877fd25a6ff5ba1cfb"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/SPIRV-Headers-29981f65241605e08b0ede4cfeb999fe3b723c6a.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 572275,
+        "mtime": 1792075939.849968,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.849968"
+        }
+      },
+      "source": {
+        "sha256": "232899f1ad4104fb5bc377b94596c7621575eee62ad9a9e8f929b63a7dd8a7ad",
+        "url": "https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/29981f65241605e08b0ede4cfeb999fe3b723c6a"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/SPIRV-Tools-0d6fd73ca73830ccab5fa1f00ed5ed40124e2c55.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 3527179,
+        "mtime": 1792075939.8591394,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.8591394"
+        }
+      },
+      "source": {
+        "sha256": "20219c0962dffb0d7644bb3116a5923cfcf0526a569baa0b2a17343dd2fa6e5d",
+        "url": "https://codeload.github.com/KhronosGroup/SPIRV-Tools/tar.gz/0d6fd73ca73830ccab5fa1f00ed5ed40124e2c55"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/Volk-776893306c5d3b22b6185b5d4a258b81d94572bf.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 86065,
+        "mtime": 1792075939.8606322,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.8606322"
+        }
+      },
+      "source": {
+        "sha256": "ff5b63e1b7104b34955eb4a993b94882a55f8561e971b92119069e496e3496b5",
+        "url": "https://codeload.github.com/zeux/Volk/tar.gz/776893306c5d3b22b6185b5d4a258b81d94572bf"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/Vulkan-Headers-85c2334e92e215cce34e8e0ed8b2dce4700f4a50.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 2046570,
+        "mtime": 1792075939.8644042,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.8644042"
+        }
+      },
+      "source": {
+        "sha256": "9b85bd804cfc0012bae60f5b540947fc2071603b547ce64674fb8c24a9f6aa25",
+        "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/85c2334e92e215cce34e8e0ed8b2dce4700f4a50"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/Vulkan-Headers-e3b1eec08173d6b825cd3ac88c885a63b621504a.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 3376893,
+        "mtime": 1792075939.8760722,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.8760722"
+        }
+      },
+      "source": {
+        "sha256": "f492279345cbc10708b64fcd432b3ff6c8246a5837c4db2b649abba00cf82208",
+        "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/e3b1eec08173d6b825cd3ac88c885a63b621504a"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/Vulkan-Headers-fc6c06ac529e4b4b6e34c17cc650a8f62dee2eb0.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 2284566,
+        "mtime": 1792075939.883669,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.883669"
+        }
+      },
+      "source": {
+        "sha256": "6784d0df61144e5e08e16bfa110e1d287c2a0e3d41ef6a394cfef4b8f03da4c3",
+        "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/fc6c06ac529e4b4b6e34c17cc650a8f62dee2eb0"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/Vulkan-Tools-8c66b352925cb771f793a4d3220b1321ae0febf1.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 820032,
+        "mtime": 1792075939.8905373,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.8905373"
+        }
+      },
+      "source": {
+        "sha256": "170eaa9086812c0a8d5275e0fa320b96af4a00fa4e84eee0437650bdd54ed2a8",
+        "url": "https://codeload.github.com/KhronosGroup/Vulkan-Tools/tar.gz/8c66b352925cb771f793a4d3220b1321ae0febf1"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/Vulkan-Tools-b47676a03827fc0c287409b243b1fd62886e79c0.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 755603,
+        "mtime": 1792075939.8922193,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.8922193"
+        }
+      },
+      "source": {
+        "sha256": "50944e82d31e494d5d27db848b1bd9e50566f088ed4097800a5cc9ef4654dcc2",
+        "url": "https://codeload.github.com/KhronosGroup/Vulkan-Tools/tar.gz/b47676a03827fc0c287409b243b1fd62886e79c0"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/cereal-51cbda5f30e56c801c07fe3d3aba5d7fb9e6cca4.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 336138,
+        "mtime": 1792075939.893891,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.893891"
+        }
+      },
+      "source": {
+        "sha256": "26361b539fe50eee308b564faa2742166d2922a7ab0bd4870ac55708581228c8",
+        "url": "https://codeload.github.com/USCiLab/cereal/tar.gz/51cbda5f30e56c801c07fe3d3aba5d7fb9e6cca4"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/cereal-a56bad8bbb770ee266e930c95d37fff2a5be7fea.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 386830,
+        "mtime": 1792075939.8947737,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075939.8947737"
+        }
+      },
+      "source": {
+        "sha256": "12e10fb541270632f6683286ce8c7e8c321fe4addb53fa91ed498b95c1758f93",
+        "url": "https://codeload.github.com/USCiLab/cereal/tar.gz/a56bad8bbb770ee266e930c95d37fff2a5be7fea"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/crossover-sources-26.3.0.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 149054023,
+        "mtime": 1792075940.308005,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075940.308005"
+        }
+      },
+      "source": {
+        "sha256": "ac99c8ca4b3848f3e81784135f023df266b61c2345726ea55a50b3e030dd6872",
+        "url": "https://media.codeweavers.com/pub/crossover/source/crossover-sources-26.3.0.tar.gz"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/d9vk-f229921c1b7f14edeadeccff04a9e65d0a016148.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 922617,
+        "mtime": 1792075940.314581,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075940.314581"
+        }
+      },
+      "source": {
+        "sha256": "9454f2d2595850ea6b9e09f2f2679fdf3ce17dc4e4f7ea0d2a6116127fc471b6",
+        "url": "https://codeload.github.com/Sikarugir-App/d9vk/tar.gz/f229921c1b7f14edeadeccff04a9e65d0a016148"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/glslang-fa9c3deb49e035a8abcabe366f26aac010f6cbfb.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 3858944,
+        "mtime": 1792075940.3254406,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075940.3254406"
+        }
+      },
+      "source": {
+        "sha256": "dc52424b8d3b302038068537084dfc557c870a9bfaec77c1ee025bba38148177",
+        "url": "https://codeload.github.com/KhronosGroup/glslang/tar.gz/fa9c3deb49e035a8abcabe366f26aac010f6cbfb"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/libdeflate-92e6a0db.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 198808,
+        "mtime": 1792075940.3261337,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075940.3261337"
+        }
+      },
+      "source": {
+        "version": "1.26",
+        "revision": "92e6a0db9fa848d742f9eb286c92afc60f2c3dda",
+        "url": "https://codeload.github.com/ebiggers/libdeflate/tar.gz/92e6a0db9fa848d742f9eb286c92afc60f2c3dda",
+        "sha256": "af56498149827f5a5e3f1ffb653c79c8c75557f3dc2caf6002cac38a59b844b7"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/mingw-w64-COPYING-v14.0.0.txt",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 2326,
+        "mtime": 1792075940.3262982,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075940.3262982"
+        }
+      },
+      "source": {
+        "sha256": "99a69660981156c21336fdb5661f89341b013c94e4bf9e1c7467b4745718397f",
+        "url": "https://raw.githubusercontent.com/mingw-w64/mingw-w64/v14.0.0/COPYING"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/nettle-3.10.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 2640485,
+        "mtime": 1792075940.3304179,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075940.3304179"
+        }
+      },
+      "source": {
+        "sha256": "b4c518adb174e484cb4acea54118f02380c7133771e7e9beb98a0787194ee47c",
+        "url": "https://ftp.gnu.org/gnu/nettle/nettle-3.10.tar.gz"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/spirv-headers-2acb319af38d43be3ea76bfabf3998e5281d8d12.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 522013,
+        "mtime": 1792075940.3317492,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075940.3317492"
+        }
+      },
+      "source": {
+        "sha256": "425da1e3e4ba8de41dc8c8273d281ae82f1e18a397ec476649df3c832e242329",
+        "url": "https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/2acb319af38d43be3ea76bfabf3998e5281d8d12"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/spirv-tools-0cfe9e7219148716dfd30b37f4d21753f098707a.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 3173510,
+        "mtime": 1792075940.3417509,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075940.3417509"
+        }
+      },
+      "source": {
+        "sha256": "a5277538fec0868452b1f616553c2fca80939a6a3ee0b7322e21ff063750a482",
+        "url": "https://codeload.github.com/KhronosGroup/SPIRV-Tools/tar.gz/0cfe9e7219148716dfd30b37f4d21753f098707a"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/volk-466085407d5d2f50583fd663c1d65f93a7709d3e.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 62581,
+        "mtime": 1792075940.34262,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075940.34262"
+        }
+      },
+      "source": {
+        "sha256": "ac58bdcbb20ed814d5741b279c5f71f73db5a921856cbc3771793914dd4297e7",
+        "url": "https://codeload.github.com/zeux/volk/tar.gz/466085407d5d2f50583fd663c1d65f93a7709d3e"
+      }
+    },
+    {
+      "info": {
+        "name": "cache/zlib-ng-12731092.tar.gz",
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "size": 2450038,
+        "mtime": 1792075940.346014,
+        "type": "0",
+        "linkname": "",
+        "uname": "mac",
+        "gname": "staff",
+        "devmajor": 0,
+        "devminor": 0,
+        "pax_headers": {
+          "mtime": "1792075940.346014"
+        }
+      },
+      "source": {
+        "version": "2.3.3",
+        "revision": "12731092979c6d07f42da27da673a9f6c7b13586",
+        "url": "https://codeload.github.com/zlib-ng/zlib-ng/tar.gz/12731092979c6d07f42da27da673a9f6c7b13586",
+        "sha256": "a0d2a5d122c84b56a793a1553a9c3327fb2eb7469bf7a86b79e3c7be5d92e8d6"
+      }
+    }
+  ]
+}
