@@ -1,0 +1,433 @@
+diff --git a/src/util/util_profile.h b/src/util/util_profile.h
+--- a/src/util/util_profile.h
++++ b/src/util/util_profile.h
+@@ -2,6 +2,7 @@
+ #include <atomic>
+ #include <chrono>
+ #include <cstdint>
++#include <string>
+ namespace dxvk {
+   // -1 requests lazy initialization; the steady disabled path is one load.
+   extern std::atomic<int32_t> profileState;
+@@ -15,6 +16,23 @@
+   void profileShutdown();
+   void profileEvent(const char* name, std::chrono::steady_clock::time_point begin,
+     std::chrono::steady_clock::time_point end);
++  struct ProfileIdentity {
++    char pipeline[41] = {};
++    char shaders[256] = {};
++    char coverage[80] = {};
++    char role[16] = {};
++  };
++  extern thread_local ProfileIdentity profileIdentity;
++  void profileRememberShader(const std::string& key, const char* coverage);
++  std::string profileShaderCoverage(const std::string& key);
++  class ProfileContext {
++    ProfileIdentity previous;
++    bool enabled;
++  public:
++    ProfileContext(const std::string& pipeline, const std::string& shaders,
++      const std::string& coverage, const char* role);
++    ~ProfileContext();
++  };
+   class ProfileScope {
+     const char* m_name;
+     std::chrono::steady_clock::time_point m_begin;
+diff --git a/src/util/util_profile.cpp b/src/util/util_profile.cpp
+--- a/src/util/util_profile.cpp
++++ b/src/util/util_profile.cpp
+@@ -5,12 +5,40 @@
+ #include <fstream>
+ #include <vector>
+ #include <cstring>
++#include <unordered_map>
++#include <array>
+ 
+ namespace dxvk {
+   std::atomic<int32_t> profileState { -1 };
++  thread_local ProfileIdentity profileIdentity;
+   namespace {
+     using Clock = std::chrono::steady_clock;
+-    struct Event { const char* name; uint32_t tid; int64_t start, duration; };
++    enum Category { Presentation, Pipeline, Shader, File, Texture, Submission, Pacing, Other, CategoryCount };
++    const char* categoryNames[] = { "presentation", "pipeline", "shader", "file", "texture", "submission", "pacing", "other" };
++    Category category(const char* n) {
++      if (!std::strcmp(n, "presentation")) return Presentation;
++      if (std::strstr(n, "pipeline")) return Pipeline;
++      if (std::strstr(n, "shader")) return Shader;
++      if (std::strstr(n, "read_file") || std::strstr(n, "internet_read")) return File;
++      if (std::strstr(n, "texture")) return Texture;
++      if (std::strstr(n, "submission") || std::strstr(n, "acquisition") || std::strstr(n, "queue_")) return Submission;
++      if (std::strstr(n, "frame_")) return Pacing;
++      return Other;
++    }
++    const char* aggregateNames[] = { "graphics_pipeline_background_lock_wait", "compute_pipeline_background_lock_wait",
++      "graphics_pipeline_background_request", "compute_pipeline_background_request", "submission_queue_throttle",
++      "game_read_file", "game_internet_read_file" };
++    struct Aggregate {
++      std::atomic<uint64_t> count {0}, total {0}, maximum {0};
++      void add(uint64_t us) {
++        ++count; total.fetch_add(us, std::memory_order_relaxed);
++        auto old = maximum.load(std::memory_order_relaxed);
++        while (old < us && !maximum.compare_exchange_weak(old, us, std::memory_order_relaxed)) { }
++      }
++    };
++    struct Event { const char* name; uint32_t tid; int64_t start, duration; Category cat; ProfileIdentity identity; };
++    dxvk::mutex shaderLock;
++    std::unordered_map<std::string, std::string> shaderCoverage;
+     class Recorder {
+     public:
+       Clock::time_point origin;
+@@ -19,17 +47,17 @@
+         if (path.empty()) { profileState.store(0); return; }
+         file.open(path, std::ios::trunc | std::ios::binary);
+         if (!file) { profileState.store(0); return; }
+-        file << "event,thread,start_us,duration_us\n";
+         origin = Clock::now();
++        file << "# schema_version=2\n# thread_id_domain=wine_windows\n"
++             << "# pipeline_id_scope=same_renderer_state_and_renderpass\n"
++             << "event,thread,start_us,duration_us,pipeline_id,shader_ids,coverage,role\n";
++        syncClock();
+         const auto requested = env::getEnvVar("DXVK_W101_PROFILE_SECONDS");
+         try { if (!requested.empty()) seconds = std::max(30, std::min(900, std::stoi(requested))); } catch (...) { }
+-        pending.reserve(8192);
+-        pendingPresentations.reserve(1024);
++        pending.reserve(8192); critical.reserve(8192); presentations.reserve(1024);
+         allFileReads = env::getEnvVar("DXVK_W101_PROFILE_ALL_READS") == "1";
+         profileState.store(1);
+-        try { worker = dxvk::thread([this] {
+-          try { write(); } catch (...) { profileState.store(0); }
+-        }); }
++        try { worker = dxvk::thread([this] { try { write(); } catch (...) { profileState.store(0); } }); }
+         catch (...) { profileState.store(0); file.close(); }
+       }
+       void shutdown() {
+@@ -39,101 +67,119 @@
+       }
+       void event(const char* name, Clock::time_point begin, Clock::time_point end) {
+         if (profileState.load(std::memory_order_relaxed) != 1) return;
+-        if (end - origin >= std::chrono::seconds(seconds)) {
+-          profileState.store(0); cond.notify_all(); return;
++        if (end - origin >= std::chrono::seconds(seconds)) { profileState.store(0); cond.notify_all(); return; }
++        const auto cat = category(name);
++        const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
++        for (size_t i = 0; i < 7; ++i) {
++          if (!std::strcmp(name, aggregateNames[i]) && duration < 100 && (i < 5 || !allFileReads)) {
++            aggregates[i].add(std::max<int64_t>(0, duration));
++            if (i < 5) ++filteredShortEvents; else ++filteredShortFileReads;
++            return;
++          }
+         }
+-        const bool presentation = !std::strcmp(name, "presentation");
+-        if (!allFileReads && !std::strcmp(name, "game_read_file")
+-         && end - begin < std::chrono::microseconds(100)) {
+-          ++filteredShortFileReads; return;
+-        }
+-        // Near-zero background lock checks and queue admissions can flood a
+-        // first-arrival capture. Keep real waits and count the filtered checks.
+-        if (end - begin < std::chrono::microseconds(100)
+-         && (!std::strcmp(name, "graphics_pipeline_background_lock_wait")
+-          || !std::strcmp(name, "compute_pipeline_background_lock_wait")
+-          || !std::strcmp(name, "submission_queue_throttle"))) {
+-          ++filteredShortEvents; return;
+-        }
+-        // Frame timestamps have their own bounded queue. Busy compilation
+-        // producers cannot evict them or contend for their profiling lock.
+-        auto& queue = presentation ? pendingPresentations : pending;
+-        auto& queueLock = presentation ? presentationLock : lock;
++        const bool important = cat == Pipeline || cat == Shader || (std::strstr(name, "wait") && duration >= 100);
++        auto& queue = cat == Presentation ? presentations : (important ? critical : pending);
++        auto& queueLock = cat == Presentation ? frameLock : (important ? criticalLock : lock);
+         std::unique_lock<dxvk::mutex> guard(queueLock, std::try_to_lock);
+-        if (!guard.owns_lock() || queue.size() >= (presentation ? 1024u : 8192u)) {
+-          ++dropped; if (presentation) ++droppedPresentations; return;
+-        }
+-        queue.push_back({ name, this_thread::get_id(),
+-          std::chrono::duration_cast<std::chrono::microseconds>(begin - origin).count(),
+-          std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() });
++        if (!guard.owns_lock() || queue.size() >= (cat == Presentation ? 1024u : 8192u)) { ++loss[cat]; return; }
++        if (profileState.load(std::memory_order_relaxed) != 1) return;
++        queue.push_back({ name, ::GetCurrentThreadId(),
++          std::chrono::duration_cast<std::chrono::microseconds>(begin - origin).count(), duration, cat, profileIdentity });
+       }
+     private:
+       std::ofstream file;
+-      dxvk::mutex lock;
+-      dxvk::mutex presentationLock;
++      dxvk::mutex lock, frameLock, criticalLock;
+       dxvk::condition_variable cond;
+       dxvk::thread worker;
+-      std::vector<Event> pending;
+-      std::vector<Event> pendingPresentations;
+-      std::atomic<uint64_t> dropped { 0 };
+-      std::atomic<uint64_t> droppedPresentations { 0 };
+-      std::atomic<uint64_t> filteredShortEvents { 0 };
+-      std::atomic<uint64_t> filteredShortFileReads { 0 };
++      std::vector<Event> pending, critical, presentations;
++      std::array<std::atomic<uint64_t>, CategoryCount> loss {};
++      Aggregate aggregates[7];
++      std::atomic<uint64_t> filteredShortEvents {0}, filteredShortFileReads {0};
+       int seconds = 180;
+-      bool stop = false;
+-      bool allFileReads = false;
++      bool stop = false, allFileReads = false;
++      void syncClock() {
++        const auto before = Clock::now();
++        FILETIME time; ::GetSystemTimePreciseAsFileTime(&time);
++        LARGE_INTEGER ticks, frequency; ::QueryPerformanceCounter(&ticks); ::QueryPerformanceFrequency(&frequency);
++        const auto after = Clock::now();
++        const uint64_t unixUs = ((uint64_t(time.dwHighDateTime) << 32) | time.dwLowDateTime) / 10 - 11644473600000000ull;
++        file << "# clock_sync={\"relative_us\":" << std::chrono::duration_cast<std::chrono::microseconds>((before + (after-before)/2)-origin).count()
++             << ",\"unix_us\":" << unixUs << ",\"uncertainty_us\":" << std::chrono::duration_cast<std::chrono::microseconds>(after-before).count()
++             << ",\"qpc_ticks\":" << ticks.QuadPart << ",\"qpc_frequency\":" << frequency.QuadPart << "}\n";
++      }
++      void footer() {
++        uint64_t dropped = 0;
++        for (auto& count : loss) dropped += count.load();
++        file << "# dropped_events=" << dropped << "\n# dropped_presentations=" << loss[Presentation].load()
++             << "\n# filtered_short_events=" << filteredShortEvents.load()
++             << "\n# filtered_short_file_reads=" << filteredShortFileReads.load() << '\n';
++        for (int i = 0; i < CategoryCount; ++i) file << "# dropped_category_" << categoryNames[i] << '=' << loss[i].load() << '\n';
++        for (size_t i = 0; i < 7; ++i) file << "# aggregate_" << aggregateNames[i] << "={\"count\":" << aggregates[i].count.load()
++          << ",\"total_us\":" << aggregates[i].total.load() << ",\"max_us\":" << aggregates[i].maximum.load() << "}\n";
++      }
+       void write() {
+         env::setThreadName("w101-timing-writer");
+         ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+-        std::vector<Event> batch; batch.reserve(8192);
+-        std::vector<Event> frames; frames.reserve(1024);
+-        size_t bytes = 34;
++        std::vector<Event> batch, frames, important;
++        batch.reserve(8192); important.reserve(8192); frames.reserve(1024);
++        size_t bytes = size_t(file.tellp());
++        auto nextSync = Clock::now() + std::chrono::seconds(1);
+         for (;;) {
+           std::unique_lock<dxvk::mutex> guard(lock);
+-          cond.wait_until(guard, std::min(origin + std::chrono::seconds(seconds),
+-            Clock::now() + std::chrono::milliseconds(250)), [this] { return stop || profileState.load() != 1; });
++          cond.wait_until(guard, std::min(origin + std::chrono::seconds(seconds), Clock::now() + std::chrono::milliseconds(250)),
++            [this] { return stop || profileState.load() != 1; });
+           bool done = stop || profileState.load() != 1 || Clock::now() - origin >= std::chrono::seconds(seconds);
+           if (done) profileState.store(0);
+-          pending.swap(batch);
+-          guard.unlock();
+-          { std::lock_guard<dxvk::mutex> frameGuard(presentationLock); pendingPresentations.swap(frames); }
++          pending.swap(batch); guard.unlock();
++          { std::lock_guard<dxvk::mutex> frameGuard(frameLock); presentations.swap(frames); }
++          { std::lock_guard<dxvk::mutex> criticalGuard(criticalLock); critical.swap(important); }
+           bool exhausted = false;
+-          for (const auto* events : { &frames, &batch }) {
+-            for (const auto& event : *events) {
+-              const auto row = std::string(event.name) + "," + std::to_string(event.tid) + ","
+-                + std::to_string(event.start) + "," + std::to_string(event.duration) + "\n";
+-              if (exhausted || bytes + row.size() + 256 > 64u * 1024u * 1024u) {
+-                profileState.store(0); done = true;
+-                exhausted = true; ++dropped;
+-                if (!std::strcmp(event.name, "presentation")) ++droppedPresentations;
+-                continue;
+-              }
+-              file << row; bytes += row.size();
++          for (const auto* events : { &frames, &important, &batch }) for (const auto& event : *events) {
++            const auto& id = event.identity;
++            const auto row = std::string(event.name) + "," + std::to_string(event.tid) + "," + std::to_string(event.start) + ","
++              + std::to_string(event.duration) + "," + id.pipeline + "," + id.shaders + "," + id.coverage + "," + id.role + "\n";
++            if (exhausted || bytes + row.size() + 8192 > 64u * 1024u * 1024u) {
++              profileState.store(0); done = true; exhausted = true; ++loss[event.cat]; continue;
+             }
++            file << row; bytes += row.size();
+           }
+-          batch.clear(); frames.clear(); file.flush();
++          batch.clear(); frames.clear(); important.clear();
++          if (Clock::now() >= nextSync && !exhausted) { syncClock(); bytes = size_t(file.tellp()); nextSync = Clock::now()+std::chrono::seconds(1); }
++          file.flush();
+           if (!file) { profileState.store(0); return; }
+-          if (done) { file << "# dropped_events=" << dropped.load()
+-            << "\n# dropped_presentations=" << droppedPresentations.load()
+-            << "\n# filtered_short_events=" << filteredShortEvents.load()
+-            << "\n# filtered_short_file_reads=" << filteredShortFileReads.load() << "\n"; file.flush(); return; }
++          if (done) { footer(); file.flush(); return; }
+         }
+       }
+     };
+-    // Do not join a thread from a DLL static destructor under Wine's loader
+-    // lock. Drain on the last orderly device shutdown. Abrupt process exit
+-    // keeps already-flushed batches and lets the OS reclaim this recorder.
++    // Drain on orderly shutdown, never join under Wine's DLL loader lock.
+     Recorder& recorder() { static Recorder* instance = new Recorder(); return *instance; }
+-    std::atomic<uint32_t> devices { 0 };
++    std::atomic<uint32_t> devices {0};
+   }
++  ProfileContext::ProfileContext(const std::string& pipeline, const std::string& shaders,
++      const std::string& coverage, const char* role) : enabled(profileEnabled()) {
++    if (!enabled) return;
++    previous = profileIdentity;
++    profileIdentity = {};
++    std::strncpy(profileIdentity.pipeline, pipeline.c_str(), sizeof(profileIdentity.pipeline)-1);
++    std::strncpy(profileIdentity.shaders, shaders.c_str(), sizeof(profileIdentity.shaders)-1);
++    std::strncpy(profileIdentity.coverage, coverage.c_str(), sizeof(profileIdentity.coverage)-1);
++    std::strncpy(profileIdentity.role, role, sizeof(profileIdentity.role)-1);
++  }
++  ProfileContext::~ProfileContext() { if (enabled) profileIdentity = previous; }
++  void profileRememberShader(const std::string& key, const char* coverage) {
++    if (!profileEnabled()) return;
++    std::lock_guard<dxvk::mutex> guard(shaderLock);
++    if (shaderCoverage.size() < 4096) shaderCoverage.emplace(key, coverage);
++  }
++  std::string profileShaderCoverage(const std::string& key) {
++    if (!profileEnabled()) return {};
++    std::lock_guard<dxvk::mutex> guard(shaderLock);
++    auto entry = shaderCoverage.find(key);
++    return entry == shaderCoverage.end() ? "unknown" : entry->second;
++  }
+   void profileDeviceCreated() { ++devices; }
+   void profileDeviceDestroyed() { if (devices.fetch_sub(1) == 1) recorder().shutdown(); }
+   void profileShutdown() { recorder().shutdown(); }
+-  bool profileInitialize() {
+-    recorder();
+-    return profileState.load(std::memory_order_relaxed) == 1;
+-  }
+-  void profileEvent(const char* name, Clock::time_point begin, Clock::time_point end) {
+-    recorder().event(name, begin, end);
+-  }
++  bool profileInitialize() { recorder(); return profileState.load(std::memory_order_relaxed) == 1; }
++  void profileEvent(const char* name, Clock::time_point begin, Clock::time_point end) { recorder().event(name, begin, end); }
+ }
+diff --git a/src/d3d9/d3d9_shader.cpp b/src/d3d9/d3d9_shader.cpp
+--- a/src/d3d9/d3d9_shader.cpp
++++ b/src/d3d9/d3d9_shader.cpp
+@@ -96,6 +96,7 @@
+       m_shaders[0]->dump(dumpStream);
+     }
+ 
++    if (m_shaders[1] != nullptr) profileRememberShader(m_shaders[1]->getShaderKey().toString(), "generated");
+     pDevice->GetDXVKDevice()->registerShader(m_shaders[0]);
+ 
+         if (m_shaders[1] != nullptr)
+@@ -134,6 +135,8 @@
+       ShaderStage,
+       Sha1Hash::compute(pShaderBytecode, info.bytecodeByteLength));
+ 
++    const auto profileKey = profileEnabled() ? lookupKey.toString() : std::string();
++    ProfileContext identity({}, profileKey, background ? "restored" : "new", background ? "background" : "foreground");
+     std::shared_ptr<ModuleJob> job;
+     { std::unique_lock<dxvk::mutex> lock(m_mutex);
+       for (;;) {
+@@ -150,6 +153,7 @@
+       m_pending[lookupKey] = job;
+     }
+     try {
++      profileRememberShader(profileKey, background ? "restored" : "new");
+       *pShaderModule = D3D9CommonShader(pDevice, ShaderStage, lookupKey,
+         pDxbcModuleInfo, pShaderBytecode, info, &module);
+       { std::lock_guard<dxvk::mutex> lock(m_mutex);
+diff --git a/src/d3d9/d3d9_fixed_function.cpp b/src/d3d9/d3d9_fixed_function.cpp
+--- a/src/d3d9/d3d9_fixed_function.cpp
++++ b/src/d3d9/d3d9_fixed_function.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_profile.h"
+ #include "d3d9_fixed_function.h"
+ 
+ #include "d3d9_device.h"
+@@ -2400,7 +2401,10 @@
+       Key, name,
+       pDevice->GetOptions());
+ 
+-    m_shader = compiler.compile();
++    const auto profileKey = profileEnabled() ? shaderKey.toString() : std::string();
++    ProfileContext identity({}, profileKey, "generated", "foreground");
++    profileRememberShader(profileKey, "generated");
++    { ProfileScope timing("shader_generated_translation"); m_shader = compiler.compile(); }
+     m_isgn   = compiler.isgn();
+ 
+     Dump(Key, name);
+@@ -2423,7 +2427,10 @@
+       Key, name,
+       pDevice->GetOptions());
+ 
+-    m_shader = compiler.compile();
++    const auto profileKey = profileEnabled() ? shaderKey.toString() : std::string();
++    ProfileContext identity({}, profileKey, "generated", "foreground");
++    profileRememberShader(profileKey, "generated");
++    { ProfileScope timing("shader_generated_translation"); m_shader = compiler.compile(); }
+     m_isgn   = compiler.isgn();
+ 
+     Dump(Key, name);
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -10,6 +10,25 @@
+ #include <fstream>
+ 
+ namespace dxvk {
++  static ProfileContext captureIdentity(const DxvkGraphicsPipelineShaders& shaders,
++      const DxvkGraphicsPipelineStateInfo& state, const DxvkRenderPass* pass, const char* role) {
++    if (!profileEnabled()) return ProfileContext({}, {}, {}, role);
++    std::string keys, coverage;
++    for (const auto& shader : {shaders.vs, shaders.tcs, shaders.tes, shaders.gs, shaders.fs}) {
++      if (shader == nullptr) continue;
++      const auto key = shader->getShaderKey().toString();
++      keys += (keys.empty() ? "" : ";") + key;
++      coverage += (coverage.empty() ? "" : ";") + profileShaderCoverage(key);
++    }
++    const auto format = pass->format();
++    // State vectors are the packed bytes used by the renderer's own equality.
++    // Serialize attachment fields explicitly; no render-pass pointer/padding.
++    std::string attachments = str::format(format.sampleCount, ":", format.depth.format, ":", format.depth.layout);
++    for (auto color : format.color) attachments += str::format(":", color.format, ":", color.layout);
++    const Sha1Data parts[] = {{keys.data(), keys.size()}, {&state, sizeof(state)}, {attachments.data(), attachments.size()}};
++    return ProfileContext(Sha1Hash::compute(3, parts).toString(), keys, coverage, role);
++  }
++
+ 
+   DxvkGraphicsPipeline::DxvkGraphicsPipeline(
+           DxvkPipelineManager*        pipeMgr,
+@@ -70,6 +89,7 @@
+     DxvkGraphicsPipelineInstance* instance = this->findInstance(state, renderPass);
+ 
+     if (unlikely(!instance)) {
++      auto identity = captureIdentity(m_shaders, state, renderPass, "foreground");
+       WarmupGate::Foreground request(m_pipeMgr->warmupGate());
+       ProfileScope foreground("graphics_pipeline_foreground_request");
+       // Exit early if the state vector is invalid
+@@ -107,6 +127,7 @@
+     if (!this->validatePipelineState(state, false))
+       return false;
+ 
++    auto identity = captureIdentity(m_shaders, state, renderPass, "background");
+     WarmupGate::Background permit(m_pipeMgr->warmupGate());
+     if (!permit) return false;
+     ProfileScope background("graphics_pipeline_background_request");
+diff --git a/src/dxvk/dxvk_compute.cpp b/src/dxvk/dxvk_compute.cpp
+--- a/src/dxvk/dxvk_compute.cpp
++++ b/src/dxvk/dxvk_compute.cpp
+@@ -11,6 +11,14 @@
+ #include "dxvk_state_cache.h"
+ 
+ namespace dxvk {
++  static ProfileContext captureIdentity(const DxvkComputePipelineShaders& shaders,
++      const DxvkComputePipelineStateInfo& state, const char* role) {
++    if (!profileEnabled()) return ProfileContext({}, {}, {}, role);
++    const auto key = shaders.cs->getShaderKey().toString();
++    const Sha1Data parts[] = {{key.data(), key.size()}, {&state, sizeof(state)}};
++    return ProfileContext(Sha1Hash::compute(2, parts).toString(), key, profileShaderCoverage(key), role);
++  }
++
+   
+   DxvkComputePipeline::DxvkComputePipeline(
+           DxvkPipelineManager*        pipeMgr,
+@@ -39,6 +47,7 @@
+     DxvkComputePipelineInstance* instance = this->findInstance(state);
+ 
+     if (unlikely(!instance)) {
++      auto identity = captureIdentity(m_shaders, state, "foreground");
+       WarmupGate::Foreground request(m_pipeMgr->warmupGate());
+       ProfileScope foreground("compute_pipeline_foreground_request");
+       std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
+@@ -57,6 +66,7 @@
+ 
+   void DxvkComputePipeline::compilePipeline(
+     const DxvkComputePipelineStateInfo& state) {
++    auto identity = captureIdentity(m_shaders, state, "background");
+     WarmupGate::Background permit(m_pipeMgr->warmupGate());
+     if (!permit) return;
+     ProfileScope background("compute_pipeline_background_request");

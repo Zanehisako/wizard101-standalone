@@ -1,0 +1,631 @@
+diff --git a/src/d3d9/d3d9_common_texture.h b/src/d3d9/d3d9_common_texture.h
+--- a/src/d3d9/d3d9_common_texture.h
++++ b/src/d3d9/d3d9_common_texture.h
+@@ -70,6 +70,8 @@
+   class D3D9CommonTexture {
+ 
+   public:
++    uint32_t m_arrivalWritten=0;
++    bool m_arrivalPartial=false,m_arrivalUploaded=false;
+ 
+     D3D9CommonTexture(
+             D3D9DeviceEx*             pDevice,
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -203,6 +203,7 @@
+ 
+     Flush();
+     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
++    m_arrivalInputs.save();
+ 
+     if (m_annotation)
+       delete m_annotation;
+@@ -4789,6 +4790,10 @@
+     uint8_t* data = reinterpret_cast<uint8_t*>(mapPtr);
+     data += offset;
+     pLockedBox->pBits = data;
++    if(m_sceneTextures && pResource->IsManaged() && !(Flags&D3DLOCK_READONLY)) {
++      if(fullResource && MipLevel<15 && Face==0) pResource->m_arrivalWritten|=1u<<MipLevel;
++      else pResource->m_arrivalPartial=true;
++    }
+     return D3D_OK;
+   }
+ 
+@@ -6059,6 +6064,7 @@
+ 
+ 
+   void D3D9DeviceEx::UploadManagedTexture(D3D9CommonTexture* pResource) {
++    if(m_sceneTextures && ReuseSceneUpload(pResource)) return;
+     for (uint32_t subresource = 0; subresource < pResource->CountSubresources(); subresource++) {
+       if (!pResource->NeedsUpload(subresource))
+         continue;
+@@ -8167,25 +8173,38 @@
+ 
+   void D3D9DeviceEx::PrepareKnownAssets() {
+     const DWORD incoming = GetLastError();
++    PrepareArrivalPipelines();
++    m_arrivalPreparing=true;
+     if (auto cache = wizard101::assetCache(this)) {
+       try {
+         cache->configure(this);
+-        if (wizard101::feature("W101_PREPARE_ASSETS")) {
++        if (wizard101::feature("W101_PREPARE_ASSETS") || m_sceneTextures) {
+           cache->load();
+           cache->prepare(this,
+             [](IDirect3DTexture9* t) { static_cast<D3D9Texture2D*>(t)->AddRefPrivate(); },
+-            [](IDirect3DTexture9* t) { static_cast<D3D9Texture2D*>(t)->ReleasePrivate(); });
++            [](IDirect3DTexture9* t) { static_cast<D3D9Texture2D*>(t)->ReleasePrivate(); },
++            [](IDirect3DTexture9* t,std::shared_ptr<wizard101::AssetLease> lease) {
++              auto image=static_cast<D3D9Texture2D*>(t)->GetCommonTexture()->GetImage();
++              if(image!=nullptr) image->w101AssetLease=std::move(lease);
++            },
++            [](IDirect3DDevice9* d,IDirect3DTexture9* t) {
++              auto image=static_cast<D3D9Texture2D*>(t)->GetCommonTexture()->GetImage();
++              if(image!=nullptr) static_cast<D3D9DeviceEx*>(d)->EmitCs([image](DxvkContext* ctx) {
++                ctx->changeImageLayout(image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++              });
++            });
+           Flush();
+           SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+           m_dxvkDevice->waitForIdle();
+           cache->markReady();
+-          Logger::info(str::format("W101 known assets: prepared=", cache->preparedCount.load(), " upload_complete=1 cutoff=none budget_bytes=", wizard101::assetBytes.load()));
++
+         }
+       } catch (...) {
+         cache->clear();
+-        Logger::warn("W101 known assets unavailable; native paths retained");
+-      }
+-    }
++
++      }
++    }
++    m_arrivalPreparing=false;
+     SetLastError(incoming);
+   }
+ 
+@@ -8377,3 +8396,5 @@
+   }
+ 
+ }
++
++#include "wizard101_scene_uploads.h"
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -1,4 +1,5 @@
+ #pragma once
++#include "wizard101_arrival_inputs.h"
+ 
+ #include "../dxvk/dxvk_device.h"
+ #include "../dxvk/dxvk_cs.h"
+@@ -977,6 +978,14 @@
+     HRESULT ResetSwapChain(D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode);
+ 
+     void PrepareKnownAssets();
++    bool ReuseSceneUpload(D3D9CommonTexture* resource);
++    void PrepareArrivalPipelines();
++    W101ArrivalInputs* ArrivalInputs() { return m_preparePipelines ? &m_arrivalInputs : nullptr; }
++    bool m_sceneTextures=env::getEnvVar("W101_SCENE_TEXTURES")=="1";
++    bool m_preparePipelines=env::getEnvVar("W101_PREPARE_PIPELINES")=="1";
++    bool m_arrivalPreparing=false,m_arrivalComplete=false;
++    uint64_t m_sceneEligible=0,m_sceneHits=0,m_sceneLearned=0,m_arrivalRestored=0;
++    W101ArrivalInputs m_arrivalInputs;
+ 
+     HRESULT InitialReset(D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode);
+ 
+diff --git a/src/d3d9/d3d9_fixed_function.cpp b/src/d3d9/d3d9_fixed_function.cpp
+--- a/src/d3d9/d3d9_fixed_function.cpp
++++ b/src/d3d9/d3d9_fixed_function.cpp
+@@ -2449,6 +2449,7 @@
+   D3D9FFShader D3D9FFShaderModuleSet::GetShaderModule(
+           D3D9DeviceEx*         pDevice,
+     const D3D9FFShaderKeyVS&    ShaderKey) {
++    if(auto inputs=pDevice->ArrivalInputs()) inputs->record(3,&ShaderKey,sizeof(ShaderKey));
+     // Use the shader's unique key for the lookup
+     auto entry = m_vsModules.find(ShaderKey);
+     if (entry != m_vsModules.end())
+@@ -2466,6 +2467,7 @@
+   D3D9FFShader D3D9FFShaderModuleSet::GetShaderModule(
+           D3D9DeviceEx*         pDevice,
+     const D3D9FFShaderKeyFS&    ShaderKey) {
++    if(auto inputs=pDevice->ArrivalInputs()) inputs->record(4,&ShaderKey,sizeof(ShaderKey));
+     // Use the shader's unique key for the lookup
+     auto entry = m_fsModules.find(ShaderKey);
+     if (entry != m_fsModules.end())
+diff --git a/src/d3d9/d3d9_shader.cpp b/src/d3d9/d3d9_shader.cpp
+--- a/src/d3d9/d3d9_shader.cpp
++++ b/src/d3d9/d3d9_shader.cpp
+@@ -121,6 +121,7 @@
+ 
+     DxsoAnalysisInfo info = module.analyze();
+     *pLength = info.bytecodeByteLength;
++    if(auto inputs=pDevice->ArrivalInputs()) inputs->record(ShaderStage==VK_SHADER_STAGE_VERTEX_BIT?1:2,pShaderBytecode,info.bytecodeByteLength);
+ 
+     DxvkShaderKey lookupKey = DxvkShaderKey(
+       ShaderStage,
+diff --git a/src/d3d9/wizard101_asset_preparation.h b/src/d3d9/wizard101_asset_preparation.h
+--- a/src/d3d9/wizard101_asset_preparation.h
++++ b/src/d3d9/wizard101_asset_preparation.h
+@@ -16,6 +16,8 @@
+ #include <mutex>
+ #include <string>
+ #include <vector>
++#include <unordered_map>
++#include <unordered_set>
+ #include "../util/thread.h"
+ #include "../util/util_env.h"
+ #include "../util/log/log.h"
+diff --git a/src/dxso/dxso_code.cpp b/src/dxso/dxso_code.cpp
+--- a/src/dxso/dxso_code.cpp
++++ b/src/dxso/dxso_code.cpp
+@@ -5,24 +5,27 @@
+   DxsoCode::DxsoCode(DxsoReader& reader) {
+     m_code =
+       reinterpret_cast<const uint32_t*>(reader.currentPtr());
++    m_end = reinterpret_cast<const uint32_t*>(reader.endPtr());
+   }
+ 
+   const uint32_t* DxsoCodeIter::ptrAt(uint32_t id) const {
++    if (m_end && id > size_t(m_end - m_ptr)) throw DxvkError("DXSO catalog iterator out of bounds");
+     return m_ptr + id;
+   }
+ 
+ 
+   uint32_t DxsoCodeIter::at(uint32_t id) const {
++    if (m_end && id >= size_t(m_end - m_ptr)) throw DxvkError("DXSO catalog token out of bounds");
+     return m_ptr[id];
+   }
+ 
+ 
+   uint32_t DxsoCodeIter::read() {
+-    return *(m_ptr++);
++    const auto result = at(0); ++m_ptr; return result;
+   }
+ 
+   DxsoCodeIter DxsoCodeIter::skip(uint32_t n) const {
+-    return DxsoCodeIter(m_ptr + n);
++    return DxsoCodeIter(ptrAt(n), m_end);
+   }
+ 
+ }
+\ No newline at end of file
+diff --git a/src/dxso/dxso_code.h b/src/dxso/dxso_code.h
+--- a/src/dxso/dxso_code.h
++++ b/src/dxso/dxso_code.h
+@@ -19,8 +19,8 @@
+   public:
+     
+     DxsoCodeIter(
+-      const uint32_t* ptr)
+-    : m_ptr(ptr) { }
++      const uint32_t* ptr, const uint32_t* end = nullptr)
++    : m_ptr(ptr), m_end(end) { }
+     
+     const uint32_t* ptrAt(uint32_t id) const;
+     
+@@ -32,6 +32,7 @@
+   private:
+     
+     const uint32_t* m_ptr = nullptr;
++    const uint32_t* m_end = nullptr;
+     
+   };
+ 
+@@ -42,12 +43,13 @@
+     DxsoCode(DxsoReader& reader);
+ 
+     DxsoCodeIter iter() const {
+-      return DxsoCodeIter(m_code);
++      return DxsoCodeIter(m_code, m_end);
+     }
+ 
+   private:
+ 
+     const uint32_t* m_code;
++    const uint32_t* m_end;
+ 
+   };
+ 
+diff --git a/src/dxso/dxso_reader.cpp b/src/dxso/dxso_reader.cpp
+--- a/src/dxso/dxso_reader.cpp
++++ b/src/dxso/dxso_reader.cpp
+@@ -11,11 +11,15 @@
+   }
+ 
+   void DxsoReader::read(void* dst, size_t n) {
++    if (m_size && (m_pos > m_size || n > m_size - m_pos))
++      throw DxvkError("DXSO catalog read out of bounds");
+     std::memcpy(dst, m_data + m_pos, n);
+     m_pos += n;
+   }
+ 
+   void DxsoReader::skip(size_t n) {
++    if (m_size && (m_pos > m_size || n > m_size - m_pos))
++      throw DxvkError("DXSO catalog skip out of bounds");
+     m_pos += n;
+   }
+ 
+diff --git a/src/dxso/dxso_reader.h b/src/dxso/dxso_reader.h
+--- a/src/dxso/dxso_reader.h
++++ b/src/dxso/dxso_reader.h
+@@ -18,8 +18,10 @@
+ 
+   public:
+ 
+-    DxsoReader(const char* data)
+-      : DxsoReader(data, 0) { }
++    DxsoReader(const char* data, size_t size = 0)
++      : m_data(data), m_size(size) { }
++
++    const char* endPtr() const { return m_size ? m_data + m_size : nullptr; }
+ 
+     size_t pos() {
+       return m_pos;
+@@ -42,11 +44,10 @@
+ 
+   private:
+ 
+-    DxsoReader(const char* data, size_t pos)
+-      : m_data(data), m_pos(pos) { }
+ 
+     const char* m_data = nullptr;
+     size_t      m_pos = 0;
++    size_t      m_size = 0;
+ 
+     template<typename T>
+     T readNum() {
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -676,6 +676,47 @@
+   }
+   
+   
++  void DxvkContext::copySceneMipChain(
++    const Rc<DxvkImage>& dstImage, const Rc<DxvkImage>& srcImage) {
++    // Callers validate identical static single-layer color chains, <=15 mips.
++    // One range transition and one multi-region copy avoid repeating barriers
++    // and resource tracking for each mip. Both images retain independent storage.
++    this->spillRenderPass(true);
++    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,dstImage->info().mipLevels,0,1};
++    this->prepareImage(m_execBarriers,dstImage,range);
++    this->prepareImage(m_execBarriers,srcImage,range);
++    if(m_execBarriers.isImageDirty(dstImage,range,DxvkAccess::Write)
++        || m_execBarriers.isImageDirty(srcImage,range,DxvkAccess::Read))
++      m_execBarriers.recordCommands(m_cmd);
++    const auto dstLayout=dstImage->pickLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
++    const auto srcLayout=srcImage->pickLayout(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
++    m_execAcquires.accessImage(dstImage,range,VK_IMAGE_LAYOUT_UNDEFINED,
++      VK_PIPELINE_STAGE_TRANSFER_BIT,0,dstLayout,
++      VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
++    if(srcLayout!=srcImage->info().layout)
++      m_execAcquires.accessImage(srcImage,range,srcImage->info().layout,
++        VK_PIPELINE_STAGE_TRANSFER_BIT,0,srcLayout,
++        VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
++    m_execAcquires.recordCommands(m_cmd);
++    std::array<VkImageCopy,15> regions{};
++    for(uint32_t mip=0;mip<dstImage->info().mipLevels;mip++) {
++      regions[mip].srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,mip,0,1};
++      regions[mip].dstSubresource=regions[mip].srcSubresource;
++      regions[mip].extent=dstImage->mipLevelExtent(mip);
++    }
++    m_cmd->cmdCopyImage(DxvkCmdBuffer::ExecBuffer,srcImage->handle(),srcLayout,
++      dstImage->handle(),dstLayout,dstImage->info().mipLevels,regions.data());
++    m_execBarriers.accessImage(dstImage,range,dstLayout,
++      VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT,
++      dstImage->info().layout,dstImage->info().stages,dstImage->info().access);
++    m_execBarriers.accessImage(srcImage,range,srcLayout,
++      VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT,
++      srcImage->info().layout,srcImage->info().stages,srcImage->info().access);
++    m_cmd->trackResource<DxvkAccess::Write>(dstImage);
++    m_cmd->trackResource<DxvkAccess::Read>(srcImage);
++  }
++
++
+   void DxvkContext::copyImage(
+     const Rc<DxvkImage>&        dstImage,
+           VkImageSubresourceLayers dstSubresource,
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -342,6 +342,9 @@
+      * \param [in] srcOffset Source area offset
+      * \param [in] extent Size of the area to copy
+      */
++    // Private immutable scene templates: identical, independent color mip chains.
++    void copySceneMipChain(const Rc<DxvkImage>& dstImage, const Rc<DxvkImage>& srcImage);
++
+     void copyImage(
+       const Rc<DxvkImage>&        dstImage,
+             VkImageSubresourceLayers dstSubresource,
+diff --git a/src/dxvk/dxvk_device.h b/src/dxvk/dxvk_device.h
+--- a/src/dxvk/dxvk_device.h
++++ b/src/dxvk/dxvk_device.h
+@@ -79,6 +79,7 @@
+     friend class DxvkSubmissionQueue;
+     friend class DxvkDescriptorPoolTracker;
+   public:
++    void finishArrivalPreparation() { m_objects.pipelineManager().finishArrivalPreparation(); }
+     
+     DxvkDevice(
+       const Rc<DxvkInstance>&         instance,
+diff --git a/src/dxvk/dxvk_image.h b/src/dxvk/dxvk_image.h
+--- a/src/dxvk/dxvk_image.h
++++ b/src/dxvk/dxvk_image.h
+@@ -1,4 +1,5 @@
+ #pragma once
++#include <memory>
+ 
+ #include "dxvk_descriptor.h"
+ #include "dxvk_format.h"
+@@ -125,6 +126,7 @@
+     friend class DxvkContext;
+     friend class DxvkImageView;
+   public:
++    std::shared_ptr<void> w101AssetLease;
+     
+     DxvkImage(
+       const DxvkDevice*           device,
+diff --git a/src/dxvk/dxvk_pipecache.cpp b/src/dxvk/dxvk_pipecache.cpp
+--- a/src/dxvk/dxvk_pipecache.cpp
++++ b/src/dxvk/dxvk_pipecache.cpp
+@@ -53,7 +53,7 @@
+       Logger::warn(str::format("W101 pipeline cache unavailable: ", status)); return;
+     }
+     Logger::info(str::format("W101 pipeline cache ", data.empty() ? "empty: " : "loaded: ", m_path));
+-    try { m_writer = dxvk::thread([this] { writer(); }); }
++    try { if(env::getEnvVar("W101_PREPARE_PIPELINES")!="1") m_writer = dxvk::thread([this] { writer(); }); }
+     catch (const std::exception& e) { Logger::warn(str::format("W101 cache writer unavailable: ", e.what())); }
+     } catch (const std::exception& e) {
+       Logger::warn(str::format("W101 cache initialization failed; rendering continues: ", e.what()));
+@@ -165,5 +165,6 @@
+   void DxvkPipelineCache::stop() {
+     { std::lock_guard<dxvk::mutex> lock(m_lock); m_stop = true; m_cond.notify_all(); }
+     if (m_writer.joinable()) m_writer.join();
++    else if(!m_path.empty()) { try { save(true); } catch(...) { } }
+   }
+ }
+diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -84,6 +84,9 @@
+   }
+ 
+ 
++  void DxvkPipelineManager::finishArrivalPreparation() const {
++    if(m_stateCache!=nullptr) m_stateCache->finishArrivalPreparation();
++  }
+   void DxvkPipelineManager::stopWorkerThreads() const {
+     if (m_stateCache != nullptr)
+       m_stateCache->stopWorkerThreads();
+diff --git a/src/dxvk/dxvk_pipemanager.h b/src/dxvk/dxvk_pipemanager.h
+--- a/src/dxvk/dxvk_pipemanager.h
++++ b/src/dxvk/dxvk_pipemanager.h
+@@ -38,6 +38,7 @@
+     friend class DxvkGraphicsPipeline;
+     friend struct PipelineSnapshotProbe;
+   public:
++    void finishArrivalPreparation() const;
+     
+     DxvkPipelineManager(
+             DxvkDevice*         device,
+diff --git a/src/dxvk/dxvk_state_cache.cpp b/src/dxvk/dxvk_state_cache.cpp
+--- a/src/dxvk/dxvk_state_cache.cpp
++++ b/src/dxvk/dxvk_state_cache.cpp
+@@ -158,7 +158,7 @@
+     m_passManager (passManager) {
+     bool newFile = !readCacheFile();
+ 
+-    if (newFile) {
++    if (newFile && !m_arrival) {
+       Logger::warn("DXVK: Creating new state cache file");
+ 
+       // Start with an empty file
+@@ -190,6 +190,7 @@
+ 
+   DxvkStateCache::~DxvkStateCache() {
+     this->stopWorkerThreads();
++    if(m_arrival) saveArrivalStates();
+   }
+ 
+ 
+@@ -197,6 +198,17 @@
+     const DxvkStateCacheKey&              shaders,
+     const DxvkGraphicsPipelineStateInfo&  state,
+     const DxvkRenderPassFormat&           format) {
++    if(m_arrival) {
++      std::lock_guard<dxvk::mutex> guard(m_entryLock);
++      auto entry=DxvkStateCacheEntry{shaders,state,DxvkComputePipelineStateInfo(),format,g_nullHash};
++      auto matches=m_entryMap.equal_range(shaders);
++      for(auto i=matches.first;i!=matches.second;++i) {
++        const auto& old=m_entries[i->second];
++        if(old.format.eq(entry.format) && old.gpState==entry.gpState && old.cpState==entry.cpState) return;
++      }
++      if(m_entries.size()>=8192 || (m_entries.size()+1)*sizeof(entry)>16u*1024u*1024u-128) return;
++      mapPipelineToEntry(shaders,m_entries.size());m_entries.push_back(entry);m_arrivalDirty=true;return;
++    }
+     if (shaders.vs.eq(g_nullShaderKey))
+       return;
+     
+@@ -225,6 +237,17 @@
+   void DxvkStateCache::addComputePipeline(
+     const DxvkStateCacheKey&              shaders,
+     const DxvkComputePipelineStateInfo&   state) {
++    if(m_arrival) {
++      std::lock_guard<dxvk::mutex> guard(m_entryLock);
++      auto entry=DxvkStateCacheEntry{shaders,DxvkGraphicsPipelineStateInfo(),state,DxvkRenderPassFormat(),g_nullHash};
++      auto matches=m_entryMap.equal_range(shaders);
++      for(auto i=matches.first;i!=matches.second;++i) {
++        const auto& old=m_entries[i->second];
++        if(old.format.eq(entry.format) && old.gpState==entry.gpState && old.cpState==entry.cpState) return;
++      }
++      if(m_entries.size()>=8192 || (m_entries.size()+1)*sizeof(entry)>16u*1024u*1024u-128) return;
++      mapPipelineToEntry(shaders,m_entries.size());m_entries.push_back(entry);m_arrivalDirty=true;return;
++    }
+     if (shaders.cs.eq(g_nullShaderKey))
+       return;
+ 
+@@ -258,6 +281,7 @@
+     std::unique_lock<dxvk::mutex> entryLock(m_entryLock);
+     m_shaderMap.insert({ key, shader });
+ 
++    if(m_arrival && m_preparationDone) return;
+     // Deferred lock, don't stall workers unless we have to
+     std::unique_lock<dxvk::mutex> workerLock;
+ 
+@@ -277,7 +301,9 @@
+       if (!workerLock)
+         workerLock = std::unique_lock<dxvk::mutex>(m_workerLock);
+       
++      if(m_arrival && !m_queued.insert(p->second).second) continue;
+       m_workerQueue.push(item);
++      ++m_pending;
+     }
+ 
+     if (workerLock) {
+@@ -383,6 +409,11 @@
+       return false;
+     }
+ 
++    if(m_arrival) {
++      ifile.seekg(0,std::ios::end);auto size=ifile.tellg();ifile.seekg(0);
++      if(size>std::streamoff(16u*1024u*1024u)) return false;
++    }
++
+     // The header stores the state cache version,
+     // we need to regenerate it if it's outdated
+     DxvkStateCacheHeader newHeader;
+@@ -429,6 +460,7 @@
+       DxvkStateCacheEntry entry;
+ 
+       if (readCacheEntry(curHeader.version, ifile, entry)) {
++        if(m_arrival && (m_entries.size()>=8192 || (m_entries.size()+1)*sizeof(entry)>16u*1024u*1024u-128)) break;
+         size_t entryId = m_entries.size();
+         m_entries.push_back(entry);
+ 
+@@ -461,6 +493,31 @@
+   }
+ 
+   bool DxvkStateCache::readCacheFile() {
++    if(m_arrival) {
++      std::string dir=env::getEnvVar("W101_ARRIVAL_PATH"), identity=env::getEnvVar("W101_ARRIVAL_KEY");
++      if(dir.empty() || identity.size()!=64) return false;
++      auto key=Sha1Hash::compute(identity.data(),identity.size());std::vector<char> data;
++      std::ifstream bounded(dir+"/arrival-states.v1",std::ios::binary|std::ios::ate);
++      if(bounded && bounded.tellg()<=std::streamoff(16u*1024u*1024u) && cachefile::read(dir+"/arrival-states.v1",key,data)
++          && data.size()%sizeof(DxvkStateCacheEntry)==0 && data.size()/sizeof(DxvkStateCacheEntry)<=8192) {
++        std::string stream(data.data(),data.size());std::istringstream input(stream,std::ios::binary);
++        while(input.peek()!=std::char_traits<char>::eof()) {
++          DxvkStateCacheEntry entry;
++          if(!readCacheEntryTyped(input,entry) || !m_passManager->validateRenderPassFormat(entry.format)) {
++            m_entries.clear();m_entryMap.clear();m_pipelineMap.clear();return false;
++          }
++          mapPipelineToEntry(entry.shaders,m_entries.size());m_entries.push_back(entry);
++          mapShaderToPipeline(entry.shaders.vs,entry.shaders);mapShaderToPipeline(entry.shaders.fs,entry.shaders);
++          mapShaderToPipeline(entry.shaders.tcs,entry.shaders);mapShaderToPipeline(entry.shaders.tes,entry.shaders);
++          mapShaderToPipeline(entry.shaders.gs,entry.shaders);mapShaderToPipeline(entry.shaders.cs,entry.shaders);
++        }
++        return true;
++      }
++      if(bounded.is_open()) return false;
++      // First candidate launch imports exact existing DXVK descriptions; compiled
++      // artifacts keep their separate driver/translation compatibility checks.
++      bool loaded=realReadCacheFile(getCacheFileName());m_arrivalDirty=loaded;return loaded;
++    }
+     realReadCacheFile(getBaseCacheFileName());
+     return realReadCacheFile(getCacheFileName());
+   }
+@@ -914,6 +971,26 @@
+   }
+ 
+ 
++  void DxvkStateCache::finishArrivalPreparation() {
++    if(!m_arrival) return;
++    {std::unique_lock<dxvk::mutex> lock(m_workerLock);
++      m_workerCond.wait(lock,[this]{return m_pending.load()==0;});
++    }
++    m_preparationDone=true;stopWorkerThreads();
++  }
++  void DxvkStateCache::saveArrivalStates() {
++    if(!m_arrivalDirty) return;
++    try {
++      auto identity=env::getEnvVar("W101_ARRIVAL_KEY"),dir=env::getEnvVar("W101_ARRIVAL_PATH");
++      if(identity.size()!=64 || dir.empty()) return;
++      std::vector<char> bytes(m_entries.size()*sizeof(DxvkStateCacheEntry));
++      for(size_t i=0;i<m_entries.size();i++) {
++        auto entry=m_entries[i];entry.hash=g_nullHash;entry.hash=Sha1Hash::compute(entry);
++        std::memcpy(bytes.data()+i*sizeof(entry),&entry,sizeof(entry));
++      }
++      cachefile::write(dir+"/arrival-states.v1",Sha1Hash::compute(identity.data(),identity.size()),bytes);
++    } catch(...) { }
++  }
+   void DxvkStateCache::workerFunc() {
+     env::setThreadName("dxvk-shader");
+ 
+@@ -940,7 +1017,11 @@
+         m_workerQueue.pop();
+       }
+ 
+-      compilePipelines(item);
++      try { compilePipelines(item); } catch(...) { }
++      // Complete under the same mutex as the startup wait. Notification cannot
++      // race between its predicate check and the atomic unlock-and-wait.
++      {std::lock_guard<dxvk::mutex> lock(m_workerLock);--m_pending;}
++      m_workerCond.notify_all();
+     }
+   }
+ 
+@@ -990,7 +1071,8 @@
+       if (m_device->config().numCompilerThreads > 0)
+         numWorkers = m_device->config().numCompilerThreads;
+ 
+-      Logger::info(str::format("DXVK: Using ", numWorkers, " compiler threads"));
++      if(m_arrival) numWorkers=1;
++      if(!m_arrival) Logger::info(str::format("DXVK: Using ", numWorkers, " compiler threads"));
+ 
+       // Start the worker threads and the file writer
+       m_workerBusy.store(numWorkers);
+diff --git a/src/dxvk/dxvk_state_cache.h b/src/dxvk/dxvk_state_cache.h
+--- a/src/dxvk/dxvk_state_cache.h
++++ b/src/dxvk/dxvk_state_cache.h
+@@ -7,6 +7,9 @@
+ #include <queue>
+ #include <unordered_map>
+ #include <vector>
++#include <unordered_set>
++#include "../util/util_cache_file.h"
++#include "../util/util_env.h"
+ 
+ #include "dxvk_state_cache_types.h"
+ 
+@@ -26,6 +29,12 @@
+   class DxvkStateCache : public RcObject {
+ 
+   public:
++    void finishArrivalPreparation();
++    bool m_arrival=env::getEnvVar("W101_PREPARE_PIPELINES")=="1";
++    bool m_preparationDone=false,m_arrivalDirty=false;
++    std::atomic<uint32_t> m_pending{0};
++    std::unordered_set<DxvkStateCacheKey,DxvkHash,DxvkEq> m_queued;
++    void saveArrivalStates();
+ 
+     DxvkStateCache(
+             DxvkDevice*           device,
+@@ -81,7 +90,7 @@
+      * \returns \c true if we're compiling shaders
+      */
+     bool isCompilingShaders() {
+-      return m_workerBusy.load() > 0;
++      return m_arrival ? m_pending.load()>0 : m_workerBusy.load()>0;
+     }
+ 
+   private:
+diff --git a/src/util/util_shader_revision.h b/src/util/util_shader_revision.h
+--- a/src/util/util_shader_revision.h
++++ b/src/util/util_shader_revision.h
+@@ -1,2 +1,2 @@
+ #pragma once
+-#define W101_SHADER_REVISION "aa1859ec0a18d4efd5a254f3a7e05dbeea149517ab96fdd98208925049a32590"
++#define W101_SHADER_REVISION "8caef30f72b0cadb1d1a53ec7480a1317cddec32528ee85fee6d30e36bab439b"

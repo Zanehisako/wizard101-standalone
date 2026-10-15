@@ -1,0 +1,1031 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 37c5094..cbdc410 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -178,6 +178,15 @@ namespace dxvk {
+     m_activeRTsWhichAreTextures = 0;
+     m_alphaSwizzleRTs = 0;
+     m_lastHazardsRT = 0;
++    DxsoModuleInfo warmupInfo; warmupInfo.options = m_dxsoOptions;
++    m_shaderModules->StartCatalog(this, warmupInfo);
++    if (env::getEnvVar("DXVK_W101_WARMUP") == "1"
++     && env::getEnvVar("DXVK_W101_CATALOG") == "1") {
++      const auto stats = m_dxvkDevice->getStatCounters();
++      Logger::info(str::format("W101 pipelines prepared before gameplay: ",
++        stats.getCtr(DxvkStatCounter::PipeCountGraphics)
++      + stats.getCtr(DxvkStatCounter::PipeCountCompute)));
++    }
+   }
+ 
+ 
+@@ -187,6 +196,7 @@ namespace dxvk {
+     if (this_thread::isInModuleDetachment())
+       return;
+ 
++    m_shaderModules->StopCatalog();
+     Flush();
+     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+ 
+diff --git a/src/d3d9/d3d9_main.cpp b/src/d3d9/d3d9_main.cpp
+index 5fe02e0..22eced9 100644
+--- a/src/d3d9/d3d9_main.cpp
++++ b/src/d3d9/d3d9_main.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include "d3d9_annotation.h"
+ #include "wizard101_cursor.h"
++#include "wizard101_io_profile.h"
+ 
+ class D3DFE_PROCESSVERTICES;
+ using PSGPERRORID = UINT;
+@@ -21,6 +22,7 @@ namespace dxvk {
+ 
+ #ifdef _WIN32
+     wizard101::InstallCursorHook();
++    wizard101::InstallIoProfileHooks();
+ #endif
+     *ppDirect3D9Ex = ref(new D3D9InterfaceEx( Extended ));
+     return D3D_OK;
+diff --git a/src/d3d9/d3d9_shader.cpp b/src/d3d9/d3d9_shader.cpp
+index ef36946..56b2d4b 100644
+--- a/src/d3d9/d3d9_shader.cpp
++++ b/src/d3d9/d3d9_shader.cpp
+@@ -1,5 +1,7 @@
+ #include "../util/util_profile.h"
+ #include "d3d9_shader.h"
++#include "d3d9_warmup.h"
++#include "../util/util_shader_revision.h"
+ 
+ #include "d3d9_caps.h"
+ #include "d3d9_device.h"
+@@ -107,9 +109,15 @@ namespace dxvk {
+             uint32_t*             pLength,
+             VkShaderStageFlagBits ShaderStage,
+       const DxsoModuleInfo*       pDxbcModuleInfo,
+-      const void*                 pShaderBytecode) {
++      const void*                 pShaderBytecode,
++            bool                  background,
++            uint32_t              boundedLength) {
++    auto& gate = pDevice->GetDXVKDevice()->warmupGate();
++    WarmupGate::Foreground foreground(gate, !background);
++    WarmupGate::Background backgroundPermit(gate, background);
++    if (!backgroundPermit) return;
+     DxsoReader reader(
+-      reinterpret_cast<const char*>(pShaderBytecode));
++      reinterpret_cast<const char*>(pShaderBytecode), boundedLength);
+ 
+     DxsoModule module(reader);
+ 
+@@ -126,34 +134,69 @@ namespace dxvk {
+       ShaderStage,
+       Sha1Hash::compute(pShaderBytecode, info.bytecodeByteLength));
+ 
+-    // Use the shader's unique key for the lookup
++    std::shared_ptr<ModuleJob> job;
+     { std::unique_lock<dxvk::mutex> lock(m_mutex);
+-      
+-      auto entry = m_modules.find(lookupKey);
+-      if (entry != m_modules.end()) {
+-        *pShaderModule = entry->second;
+-        return;
++      for (;;) {
++        auto entry = m_modules.find(lookupKey);
++        if (entry != m_modules.end()) { *pShaderModule = entry->second; return; }
++        auto pending = m_pending.find(lookupKey);
++        if (pending == m_pending.end()) break;
++        job = pending->second;
++        { ProfileScope profile("shader_module_wait"); job->cond.wait(lock, [&] { return job->done; }); }
++        if (job->error && background) std::rethrow_exception(job->error);
++        // Re-check under the same lock: another waiter may already be retrying.
+       }
++      job = std::make_shared<ModuleJob>();
++      m_pending[lookupKey] = job;
+     }
+-    
+-    // This shader has not been compiled yet, so we have to create a
+-    // new module. This takes a while, so we won't lock the structure.
+-    *pShaderModule = D3D9CommonShader(
+-      pDevice, ShaderStage, lookupKey,
+-      pDxbcModuleInfo, pShaderBytecode,
+-      info, &module);
+-    
+-    // Insert the new module into the lookup table. If another thread
+-    // has compiled the same shader in the meantime, we should return
+-    // that object instead and discard the newly created module.
+-    { std::unique_lock<dxvk::mutex> lock(m_mutex);
+-      
+-      auto status = m_modules.insert({ lookupKey, *pShaderModule });
+-      if (!status.second) {
+-        *pShaderModule = status.first->second;
+-        return;
++    try {
++      *pShaderModule = D3D9CommonShader(pDevice, ShaderStage, lookupKey,
++        pDxbcModuleInfo, pShaderBytecode, info, &module);
++      { std::lock_guard<dxvk::mutex> lock(m_mutex);
++        *pShaderModule = m_modules.emplace(lookupKey, *pShaderModule).first->second;
++        job->done = true; m_pending.erase(lookupKey); job->cond.notify_all();
+       }
++      if (!background && m_catalog) m_catalog->record(ShaderStage, pShaderBytecode, info.bytecodeByteLength);
++    } catch (...) {
++      std::lock_guard<dxvk::mutex> lock(m_mutex);
++      job->error = std::current_exception(); job->done = true;
++      m_pending.erase(lookupKey); job->cond.notify_all(); throw;
+     }
+   }
+ 
++  D3D9ShaderModuleSet::D3D9ShaderModuleSet() = default;
++  D3D9ShaderModuleSet::~D3D9ShaderModuleSet() { StopCatalog(); }
++  void D3D9ShaderModuleSet::StopCatalog() { if (m_catalog) m_catalog->stop(); }
++  void D3D9ShaderModuleSet::StartCatalog(D3D9DeviceEx* device, const DxsoModuleInfo& info) {
++    const auto directory = env::getEnvVar("DXVK_W101_CATALOG_PATH");
++    if ((env::getExeName() != "WizardGraphicalClient.exe" && directory.empty())
++     || env::getEnvVar("DXVK_W101_CATALOG") != "1") return;
++    try {
++      // Serialize option values explicitly; structure padding is not a key.
++      const auto& o = info.options;
++      const auto& v = device->GetVertexConstantLayout();
++      const auto& p = device->GetPixelConstantLayout();
++      const auto& props = device->GetDXVKDevice()->properties().core.properties;
++      const auto config = str::format(W101_SHADER_REVISION, ":", o.useDemoteToHelperInvocation,
++        ":", o.useSubgroupOpsForEarlyDiscard, ":", o.strictConstantCopies, ":", int(o.d3d9FloatEmulation),
++        ":", o.strictPow, ":", o.shaderModel, ":", o.invariantPosition, ":", o.forceSamplerTypeSpecConstants,
++        ":", o.vertexFloatConstantBufferAsSSBO, ":", o.longMad, ":", o.alphaTestWiggleRoom, ":", o.robustness2Supported,
++        ":", v.floatCount, ":", v.intCount, ":", v.boolCount, ":", v.bitmaskCount,
++        ":", p.floatCount, ":", p.intCount, ":", p.boolCount, ":", p.bitmaskCount,
++        ":", props.vendorID, ":", props.deviceID, ":", props.driverVersion);
++      const Sha1Data parts[] = { { config.data(), config.size() }, { props.pipelineCacheUUID, VK_UUID_SIZE } };
++      const auto key = Sha1Hash::compute(2, parts);
++      const auto dir = directory.empty() ? "C:\\graphics-patch-cache\\Wizard101" : directory;
++      if (directory.empty()) env::createDirectory("C:\\graphics-patch-cache");
++      env::createDirectory(dir);
++      m_catalog = std::make_unique<W101ShaderCatalog>(dir + "/catalog-v1.w101shaders", key,
++        env::getEnvVar("DXVK_W101_WARMUP") == "1",
++        [this, device, info] (const W101ShaderCatalog::Record& r) {
++          D3D9CommonShader shader; uint32_t length = 0;
++          GetShaderModule(device, &shader, &length, VkShaderStageFlagBits(r.stage),
++            &info, r.words.data(), true, r.words.size() * 4);
++        }, [device] { return device->GetDXVKDevice()->isCompilingShaders(); });
++      m_catalog->waitStartup();
++    } catch (const std::exception& e) { Logger::warn(str::format("W101 catalog disabled: ", e.what())); }
++  }
+ }
+diff --git a/src/d3d9/d3d9_shader.h b/src/d3d9/d3d9_shader.h
+index 433a529..6ec2c11 100644
+--- a/src/d3d9/d3d9_shader.h
++++ b/src/d3d9/d3d9_shader.h
+@@ -6,6 +6,9 @@
+ #include "d3d9_mem.h"
+ 
+ #include <array>
++#include <memory>
++#include <exception>
++#include "../util/thread.h"
+ 
+ namespace dxvk {
+ 
+@@ -185,20 +188,29 @@ namespace dxvk {
+    * and reuse them rather than creating new ones. This
+    * class is thread-safe.
+    */
++  class W101ShaderCatalog;
+   class D3D9ShaderModuleSet : public RcObject {
+     
+   public:
+-    
++    D3D9ShaderModuleSet();
++    ~D3D9ShaderModuleSet();
++    void StartCatalog(D3D9DeviceEx* device, const DxsoModuleInfo& info);
++    void StopCatalog();
+     void GetShaderModule(
+             D3D9DeviceEx*         pDevice,
+             D3D9CommonShader*     pShaderModule,
+             uint32_t*             pLength,
+             VkShaderStageFlagBits ShaderStage,
+       const DxsoModuleInfo*       pDxbcModuleInfo,
+-      const void*                 pShaderBytecode);
++      const void*                 pShaderBytecode,
++            bool                  background = false,
++            uint32_t              boundedLength = 0);
+     
+   private:
+     
++    std::unique_ptr<W101ShaderCatalog> m_catalog;
++    struct ModuleJob { bool done = false; std::exception_ptr error; dxvk::condition_variable cond; };
++    std::unordered_map<DxvkShaderKey, std::shared_ptr<ModuleJob>, DxvkHash, DxvkEq> m_pending;
+     dxvk::mutex m_mutex;
+     
+     std::unordered_map<
+diff --git a/src/d3d9/d3d9_warmup.cpp b/src/d3d9/d3d9_warmup.cpp
+new file mode 100644
+index 0000000..aa40c60
+--- /dev/null
++++ b/src/d3d9/d3d9_warmup.cpp
+@@ -0,0 +1,144 @@
++#include "d3d9_warmup.h"
++#include "../util/util_profile.h"
++#include "../util/util_env.h"
++#include "../util/log/log.h"
++#include <cstring>
++
++namespace dxvk {
++  namespace {
++    using Clock = std::chrono::steady_clock;
++    bool valid(const W101ShaderCatalog::Record& r) {
++      if (r.words.size() < 2 || r.words.size() * 4 > W101ShaderCatalog::MaxShaderBytes) return false;
++      // The bounded DXSO reader validates instruction/operand boundaries later.
++      const auto type = r.words.front() >> 16;
++      return ((r.stage == 1 && type == 0xfffe) || (r.stage == 16 && type == 0xffff))
++          && r.words.back() == 0x0000ffff;
++    }
++  }
++  bool W101ShaderCatalog::decode(const std::vector<char>& data, std::vector<Record>& records) {
++    records.clear();
++    if (data.size() < 4 || data.size() > MaxBytes) return false;
++    uint32_t count; std::memcpy(&count, data.data(), 4);
++    if (count > MaxShaders) return false;
++    size_t offset = 4;
++    for (uint32_t i = 0; i < count; i++) {
++      if (offset + 8 > data.size()) return false;
++      uint32_t stage, bytes;
++      std::memcpy(&stage, data.data() + offset, 4);
++      std::memcpy(&bytes, data.data() + offset + 4, 4); offset += 8;
++      if (bytes < 8 || bytes % 4 || bytes > MaxShaderBytes || bytes > data.size() - offset) return false;
++      Record r { stage, std::vector<uint32_t>(bytes / 4) };
++      std::memcpy(r.words.data(), data.data() + offset, bytes); offset += bytes;
++      if (valid(r)) records.push_back(std::move(r)); // Ignore individually invalid shaders.
++    }
++    return offset == data.size();
++  }
++  std::vector<char> W101ShaderCatalog::encode(const std::vector<Record>& records) {
++    std::vector<char> data(4); uint32_t count = 0;
++    for (const auto& r : records) {
++      if (!valid(r) || count == MaxShaders || data.size() + 8 + r.words.size() * 4 > MaxBytes) continue;
++      const uint32_t bytes = r.words.size() * 4;
++      const size_t offset = data.size(); data.resize(offset + 8 + bytes);
++      std::memcpy(data.data() + offset, &r.stage, 4);
++      std::memcpy(data.data() + offset + 4, &bytes, 4);
++      std::memcpy(data.data() + offset + 8, r.words.data(), bytes); ++count;
++    }
++    std::memcpy(data.data(), &count, 4); return data;
++  }
++  W101ShaderCatalog::W101ShaderCatalog(std::string path, Sha1Hash key, bool warm,
++    Restore restore, std::function<bool()> busy)
++  : m_path(std::move(path)), m_key(key), m_warm(warm),
++    m_restore(std::move(restore)), m_busy(std::move(busy)) {
++    m_thread = dxvk::thread([this] {
++      try { worker(); }
++      catch (const std::exception& e) { Logger::warn(str::format("W101 catalog unavailable: ", e.what())); }
++      std::lock_guard<dxvk::mutex> lock(m_lock);
++      m_warmDone = true; m_cond.notify_all();
++    });
++    m_thread.set_priority(ThreadPriority::Lowest);
++  }
++  W101ShaderCatalog::~W101ShaderCatalog() { stop(); }
++  bool W101ShaderCatalog::add(Record&& r) {
++    const auto key = std::to_string(r.stage) + Sha1Hash::compute(r.words.data(), r.words.size() * 4).toString();
++    if (m_known.count(key) || m_records.size() == MaxShaders || m_bytes + 8 + r.words.size() * 4 > MaxBytes) return false;
++    m_known.emplace(key, m_records.size()); m_bytes += 8 + r.words.size() * 4;
++    m_records.push_back(std::move(r)); return true;
++  }
++  void W101ShaderCatalog::record(uint32_t stage, const void* data, uint32_t bytes) {
++    if (bytes < 8 || bytes % 4 || bytes > MaxShaderBytes || m_stop.load()) return;
++    // No disk writes or waits on the shader-creation path. At capacity we
++    // retain the learned catalog; a missed record can be learned next launch.
++    std::unique_lock<dxvk::mutex> lock(m_lock, std::try_to_lock);
++    if (!lock.owns_lock() || !m_ready || m_records.size() == MaxShaders || m_bytes + 8 + bytes > MaxBytes) return;
++    Record r { stage, std::vector<uint32_t>(bytes / 4) };
++    std::memcpy(r.words.data(), data, bytes);
++    if (valid(r) && add(std::move(r))) {
++      m_dirty = true; m_last = Clock::now(); m_cond.notify_all();
++    }
++  }
++  void W101ShaderCatalog::waitStartup() {
++    if (!m_warm) return;
++    ProfileScope profile("shader_warmup_startup_wait");
++    const auto begin = Clock::now();
++    const auto deadline = begin + std::chrono::seconds(10);
++    std::unique_lock<dxvk::mutex> lock(m_lock);
++    m_cond.wait_until(lock, deadline, [this] { return m_warmDone || m_stop.load(); });
++    Logger::info(str::format("W101 startup warm-up ", m_warmDone ? "complete" : "budget reached",
++      "; restored ", m_restored.load(), " shaders in ",
++      std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - begin).count(),
++      " ms", m_warmDone ? "" : "; remaining preparation runs in background"));
++  }
++  void W101ShaderCatalog::save() {
++    std::vector<Record> records;
++    { std::lock_guard<dxvk::mutex> lock(m_lock);
++      if (!m_dirty) return;
++      records = m_records; m_dirty = false;
++    }
++    ProfileScope profile("shader_catalog_write");
++    if (!cachefile::write(m_path, m_key, encode(records))) {
++      Logger::warn("W101 catalog persistence unavailable; rendering continues");
++      // Do not repeatedly retry permanent storage failures this launch.
++      m_path.clear();
++    }
++  }
++  void W101ShaderCatalog::worker() {
++    env::setThreadName("w101-shader-catalog");
++    std::vector<char> data; std::vector<Record> restored;
++    bool loaded;
++    { ProfileScope profile("shader_catalog_read");
++      loaded = cachefile::read(m_path, m_key, data) && decode(data, restored);
++    }
++    if (!loaded) restored.clear();
++    { std::lock_guard<dxvk::mutex> lock(m_lock);
++      for (auto& r : restored) add(Record { r.stage, r.words });
++      m_ready = true;
++    }
++    Logger::info(str::format("W101 catalog ", loaded ? "loaded: " : "empty/incompatible: ", restored.size(), " shaders; warm-up ", m_warm ? "on" : "off"));
++    if (m_warm) {
++      for (const auto& r : restored) {
++        if (m_stop.load()) break;
++        try { ProfileScope profile("shader_catalog_restore"); m_restore(r); ++m_restored; }
++        catch (const std::exception&) { Logger::warn("W101 catalog shader ignored; foreground compilation remains available"); }
++      }
++      std::unique_lock<dxvk::mutex> lock(m_lock);
++      while (!m_stop.load() && m_busy()) m_cond.wait_for(lock, std::chrono::milliseconds(10));
++    }
++    { std::lock_guard<dxvk::mutex> lock(m_lock); m_warmDone = true; m_cond.notify_all(); }
++    while (!m_stop.load()) {
++      std::unique_lock<dxvk::mutex> lock(m_lock);
++      m_cond.wait(lock, [this] { return m_stop.load() || (m_dirty && !m_path.empty()); });
++      if (m_stop.load()) break;
++      const auto last = m_last;
++      if (m_cond.wait_until(lock, last + std::chrono::seconds(5), [this, last] { return m_stop.load() || m_last != last; })) continue;
++      lock.unlock(); save();
++    }
++    if (!m_path.empty()) save();
++  }
++  void W101ShaderCatalog::stop() {
++    m_stop.store(true);
++    { std::lock_guard<dxvk::mutex> lock(m_lock); m_cond.notify_all(); }
++    if (m_thread.joinable()) {
++      if (this_thread::isInModuleDetachment()) m_thread.detach(); else m_thread.join();
++    }
++  }
++}
+diff --git a/src/d3d9/d3d9_warmup.h b/src/d3d9/d3d9_warmup.h
+new file mode 100644
+index 0000000..8eff2fc
+--- /dev/null
++++ b/src/d3d9/d3d9_warmup.h
+@@ -0,0 +1,46 @@
++#pragma once
++#include "../util/util_cache_file.h"
++#include "../util/thread.h"
++#include <atomic>
++#include <functional>
++#include <unordered_map>
++
++namespace dxvk {
++  // Private local bytecode catalog; never shipped as fixtures or source.
++  // A fixed filename bounds storage across translation/driver revisions.
++  class W101ShaderCatalog {
++  public:
++    static constexpr size_t MaxShaders = 2048;
++    static constexpr size_t MaxShaderBytes = 64 * 1024;
++    static constexpr size_t MaxBytes = 32 * 1024 * 1024;
++    struct Record { uint32_t stage; std::vector<uint32_t> words; };
++    using Restore = std::function<void(const Record&)>;
++    W101ShaderCatalog(std::string path, Sha1Hash key, bool warm,
++      Restore restore, std::function<bool()> busy);
++    ~W101ShaderCatalog();
++    void record(uint32_t stage, const void* data, uint32_t bytes);
++    void waitStartup();
++    void stop();
++    static bool decode(const std::vector<char>& data, std::vector<Record>& records);
++    static std::vector<char> encode(const std::vector<Record>& records);
++  private:
++    std::string m_path;
++    Sha1Hash m_key;
++    bool m_warm;
++    Restore m_restore;
++    std::function<bool()> m_busy;
++    dxvk::mutex m_lock;
++    dxvk::condition_variable m_cond;
++    dxvk::thread m_thread;
++    std::atomic<bool> m_stop { false };
++    std::atomic<uint32_t> m_restored { 0 };
++    bool m_ready = false, m_warmDone = false, m_dirty = false;
++    size_t m_bytes = 4;
++    std::vector<Record> m_records;
++    std::unordered_map<std::string, size_t> m_known;
++    std::chrono::steady_clock::time_point m_last;
++    void worker();
++    void save();
++    bool add(Record&& record);
++  };
++}
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index 273e0b2..932ff2c 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -28,6 +28,7 @@ d3d9_src = [
+   'd3d9_common_buffer.cpp',
+   'd3d9_buffer.cpp',
+   'd3d9_shader.cpp',
++  'd3d9_warmup.cpp',
+   'd3d9_vertex_declaration.cpp',
+   'd3d9_query.cpp',
+   'd3d9_multithread.cpp',
+diff --git a/src/d3d9/wizard101_io_profile.h b/src/d3d9/wizard101_io_profile.h
+new file mode 100644
+index 0000000..90f5b7b
+--- /dev/null
++++ b/src/d3d9/wizard101_io_profile.h
+@@ -0,0 +1,74 @@
++#pragma once
++#include "../util/util_profile.h"
++#include "../util/util_env.h"
++#include "../util/log/log.h"
++#include <windows.h>
++#include <cstring>
++#include <mutex>
++
++namespace dxvk::wizard101 {
++  // Opt-in timings of the game's own disk/stream reads. No filenames, file
++  // contents, handles, network payloads or credentials are recorded. Mapped
++  // file faults, decompression and game-side work remain outside this capture.
++  inline decltype(&::ReadFile) gameReadFile = nullptr;
++  using InternetRead = BOOL (WINAPI*)(HANDLE, LPVOID, DWORD, LPDWORD);
++  inline InternetRead gameInternetRead = nullptr;
++  inline BOOL WINAPI TimedReadFile(HANDLE file, LPVOID buffer, DWORD bytes,
++    LPDWORD read, LPOVERLAPPED overlapped) {
++    DWORD error = GetLastError(); BOOL result;
++    { ProfileScope profile("game_read_file");
++      SetLastError(error); result = gameReadFile(file, buffer, bytes, read, overlapped);
++      error = GetLastError();
++    }
++    SetLastError(error); return result;
++  }
++  inline BOOL WINAPI TimedInternetRead(HANDLE file, LPVOID buffer, DWORD bytes, LPDWORD read) {
++    DWORD error = GetLastError(); BOOL result;
++    { ProfileScope profile("game_stream_read");
++      SetLastError(error); result = gameInternetRead(file, buffer, bytes, read);
++      error = GetLastError();
++    }
++    SetLastError(error); return result;
++  }
++  inline void InstallIoProfileHooks() {
++    if (env::getExeName() != "WizardGraphicalClient.exe" || !profileEnabled()) return;
++    static std::once_flag installed;
++    std::call_once(installed, [] {
++      auto base = reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
++      auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
++      if (!base || dos->e_magic != IMAGE_DOS_SIGNATURE) return;
++      auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
++      if (nt->Signature != IMAGE_NT_SIGNATURE) return;
++      const auto dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
++      if (!dir.VirtualAddress) return;
++      auto imports = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
++      uint32_t count = 0;
++      for (; imports->Name; ++imports) {
++        if (!imports->OriginalFirstThunk) continue;
++        const auto dll = reinterpret_cast<const char*>(base + imports->Name);
++        const bool kernel = !_stricmp(dll, "kernel32.dll"), internet = !_stricmp(dll, "wininet.dll");
++        if (!kernel && !internet) continue;
++        auto names = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imports->OriginalFirstThunk);
++        auto slots = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imports->FirstThunk);
++        for (; names->u1.AddressOfData; ++names, ++slots) {
++          if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
++          const auto name = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData);
++          void* replacement = nullptr;
++          if (kernel && !strcmp(reinterpret_cast<const char*>(name->Name), "ReadFile")) {
++            gameReadFile = reinterpret_cast<decltype(gameReadFile)>(slots->u1.Function);
++            replacement = reinterpret_cast<void*>(&TimedReadFile);
++          } else if (internet && !strcmp(reinterpret_cast<const char*>(name->Name), "InternetReadFile")) {
++            gameInternetRead = reinterpret_cast<InternetRead>(slots->u1.Function);
++            replacement = reinterpret_cast<void*>(&TimedInternetRead);
++          }
++          if (!replacement) continue;
++          DWORD protection, ignored;
++          if (!VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), PAGE_READWRITE, &protection)) continue;
++          InterlockedExchangePointer(reinterpret_cast<void* volatile*>(&slots->u1.Function), replacement);
++          VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), protection, &ignored); ++count;
++        }
++      }
++      Logger::info(str::format("W101 profiling: installed ", count, " game read hooks"));
++    });
++  }
++}
+diff --git a/src/dxso/dxso_code.cpp b/src/dxso/dxso_code.cpp
+index 9fd73d9..abef416 100644
+--- a/src/dxso/dxso_code.cpp
++++ b/src/dxso/dxso_code.cpp
+@@ -5,24 +5,27 @@ namespace dxvk {
+   DxsoCode::DxsoCode(DxsoReader& reader) {
+     m_code =
+       reinterpret_cast<const uint32_t*>(reader.currentPtr());
++    m_end = reinterpret_cast<const uint32_t*>(reader.endPtr());
+   }
+ 
+   const uint32_t* DxsoCodeIter::ptrAt(uint32_t id) const {
++    if (m_end && id > size_t(m_end - m_ptr)) throw DxvkError("DXSO catalog iterator out of bounds");
+     return m_ptr + id;
+   }
+ 
+ 
+   uint32_t DxsoCodeIter::at(uint32_t id) const {
++    if (m_end && id >= size_t(m_end - m_ptr)) throw DxvkError("DXSO catalog token out of bounds");
+     return m_ptr[id];
+   }
+ 
+ 
+   uint32_t DxsoCodeIter::read() {
+-    return *(m_ptr++);
++    const auto result = at(0); ++m_ptr; return result;
+   }
+ 
+   DxsoCodeIter DxsoCodeIter::skip(uint32_t n) const {
+-    return DxsoCodeIter(m_ptr + n);
++    return DxsoCodeIter(ptrAt(n), m_end);
+   }
+ 
+ }
+\ No newline at end of file
+diff --git a/src/dxso/dxso_code.h b/src/dxso/dxso_code.h
+index 51fdab7..2ba37cf 100644
+--- a/src/dxso/dxso_code.h
++++ b/src/dxso/dxso_code.h
+@@ -19,8 +19,8 @@ namespace dxvk {
+   public:
+     
+     DxsoCodeIter(
+-      const uint32_t* ptr)
+-    : m_ptr(ptr) { }
++      const uint32_t* ptr, const uint32_t* end = nullptr)
++    : m_ptr(ptr), m_end(end) { }
+     
+     const uint32_t* ptrAt(uint32_t id) const;
+     
+@@ -32,6 +32,7 @@ namespace dxvk {
+   private:
+     
+     const uint32_t* m_ptr = nullptr;
++    const uint32_t* m_end = nullptr;
+     
+   };
+ 
+@@ -42,12 +43,13 @@ namespace dxvk {
+     DxsoCode(DxsoReader& reader);
+ 
+     DxsoCodeIter iter() const {
+-      return DxsoCodeIter(m_code);
++      return DxsoCodeIter(m_code, m_end);
+     }
+ 
+   private:
+ 
+     const uint32_t* m_code;
++    const uint32_t* m_end;
+ 
+   };
+ 
+diff --git a/src/dxso/dxso_reader.cpp b/src/dxso/dxso_reader.cpp
+index ab47f28..5d2511a 100644
+--- a/src/dxso/dxso_reader.cpp
++++ b/src/dxso/dxso_reader.cpp
+@@ -11,11 +11,15 @@ namespace dxvk {
+   }
+ 
+   void DxsoReader::read(void* dst, size_t n) {
++    if (m_size && (m_pos > m_size || n > m_size - m_pos))
++      throw DxvkError("DXSO catalog read out of bounds");
+     std::memcpy(dst, m_data + m_pos, n);
+     m_pos += n;
+   }
+ 
+   void DxsoReader::skip(size_t n) {
++    if (m_size && (m_pos > m_size || n > m_size - m_pos))
++      throw DxvkError("DXSO catalog skip out of bounds");
+     m_pos += n;
+   }
+ 
+diff --git a/src/dxso/dxso_reader.h b/src/dxso/dxso_reader.h
+index fa650bb..987f7d9 100644
+--- a/src/dxso/dxso_reader.h
++++ b/src/dxso/dxso_reader.h
+@@ -18,8 +18,10 @@ namespace dxvk {
+ 
+   public:
+ 
+-    DxsoReader(const char* data)
+-      : DxsoReader(data, 0) { }
++    DxsoReader(const char* data, size_t size = 0)
++      : m_data(data), m_size(size) { }
++
++    const char* endPtr() const { return m_size ? m_data + m_size : nullptr; }
+ 
+     size_t pos() {
+       return m_pos;
+@@ -42,11 +44,10 @@ namespace dxvk {
+ 
+   private:
+ 
+-    DxsoReader(const char* data, size_t pos)
+-      : m_data(data), m_pos(pos) { }
+ 
+     const char* m_data = nullptr;
+     size_t      m_pos = 0;
++    size_t      m_size = 0;
+ 
+     template<typename T>
+     T readNum() {
+diff --git a/src/dxvk/dxvk_compute.cpp b/src/dxvk/dxvk_compute.cpp
+index fc600d1..6bb1a87 100644
+--- a/src/dxvk/dxvk_compute.cpp
++++ b/src/dxvk/dxvk_compute.cpp
+@@ -39,6 +39,8 @@ namespace dxvk {
+     DxvkComputePipelineInstance* instance = this->findInstance(state);
+ 
+     if (unlikely(!instance)) {
++      WarmupGate::Foreground request(m_pipeMgr->warmupGate());
++      ProfileScope foreground("compute_pipeline_foreground_request");
+       std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
+       { ProfileScope timing("compute_pipeline_foreground_lock_wait"); lock.lock(); }
+       instance = this->findInstance(state);
+@@ -55,6 +57,9 @@ namespace dxvk {
+ 
+   void DxvkComputePipeline::compilePipeline(
+     const DxvkComputePipelineStateInfo& state) {
++    WarmupGate::Background permit(m_pipeMgr->warmupGate());
++    if (!permit) return;
++    ProfileScope background("compute_pipeline_background_request");
+     std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
+     { ProfileScope timing("compute_pipeline_background_lock_wait"); lock.lock(); }
+ 
+diff --git a/src/dxvk/dxvk_device.h b/src/dxvk/dxvk_device.h
+index e23f2c6..b79db78 100644
+--- a/src/dxvk/dxvk_device.h
++++ b/src/dxvk/dxvk_device.h
+@@ -388,6 +388,8 @@ namespace dxvk {
+      */
+     void registerShader(
+       const Rc<DxvkShader>&         shader);
++    bool isCompilingShaders() { return m_objects.pipelineManager().isCompilingShaders(); }
++    WarmupGate& warmupGate() { return m_objects.pipelineManager().warmupGate(); }
+     
+     /**
+      * \brief Presents a swap chain image
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index b15502c..3fc70d4 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -70,6 +70,8 @@ namespace dxvk {
+     DxvkGraphicsPipelineInstance* instance = this->findInstance(state, renderPass);
+ 
+     if (unlikely(!instance)) {
++      WarmupGate::Foreground request(m_pipeMgr->warmupGate());
++      ProfileScope foreground("graphics_pipeline_foreground_request");
+       // Exit early if the state vector is invalid
+       if (!this->validatePipelineState(state, true))
+         return VK_NULL_HANDLE;
+@@ -105,6 +107,9 @@ namespace dxvk {
+     if (!this->validatePipelineState(state, false))
+       return false;
+ 
++    WarmupGate::Background permit(m_pipeMgr->warmupGate());
++    if (!permit) return false;
++    ProfileScope background("graphics_pipeline_background_request");
+     // Keep the object locked while compiling a pipeline since compiling
+     // similar pipelines concurrently is fragile on some drivers
+     std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
+diff --git a/src/dxvk/dxvk_pipecache.cpp b/src/dxvk/dxvk_pipecache.cpp
+index a5002f2..090a443 100644
+--- a/src/dxvk/dxvk_pipecache.cpp
++++ b/src/dxvk/dxvk_pipecache.cpp
+@@ -8,7 +8,9 @@
+ 
+ namespace dxvk {
+   DxvkPipelineCache::DxvkPipelineCache(const Rc<vk::DeviceFn>& vkd,
+-    const VkPhysicalDeviceProperties& props) : m_vkd(vkd) {
++    const VkPhysicalDeviceProperties& props)
++  : m_warmup(env::getEnvVar("DXVK_W101_WARMUP") == "1"
++      && (env::getExeName() == "WizardGraphicalClient.exe" || !env::getEnvVar("DXVK_W101_CATALOG_PATH").empty())), m_vkd(vkd) {
+     try {
+     const auto dirOverride = env::getEnvVar("DXVK_W101_CACHE_PATH");
+     if (env::getExeName() != "WizardGraphicalClient.exe" && dirOverride.empty()) return;
+@@ -26,6 +28,7 @@ namespace dxvk {
+     if (dirOverride.empty()) env::createDirectory("C:\\graphics-patch-cache");
+     env::createDirectory(dir);
+     m_path = dir + "/" + m_key.toString() + ".vkcache";
++    ProfileScope loadTiming("pipeline_cache_load");
+     std::vector<char> data;
+     const bool loaded = cachefile::read(m_path, m_key, data);
+     if (loaded) {
+diff --git a/src/dxvk/dxvk_pipecache.h b/src/dxvk/dxvk_pipecache.h
+index bd42ae4..0d6d011 100644
+--- a/src/dxvk/dxvk_pipecache.h
++++ b/src/dxvk/dxvk_pipecache.h
+@@ -2,6 +2,7 @@
+ #include <atomic>
+ #include <shared_mutex>
+ #include <vector>
++#include "../util/util_warmup.h"
+ #include "dxvk_include.h"
+ #include "../util/thread.h"
+ #include "../util/sha1/sha1_util.h"
+@@ -17,7 +18,9 @@ namespace dxvk {
+     VkResult createGraphics(const VkGraphicsPipelineCreateInfo* info, VkPipeline* pipeline);
+     VkResult createCompute(const VkComputePipelineCreateInfo* info, VkPipeline* pipeline);
+     void stop();
++    WarmupGate& warmupGate() { return m_warmup; }
+   private:
++    WarmupGate m_warmup;
+     Rc<vk::DeviceFn> m_vkd;
+     VkPipelineCache m_cache = VK_NULL_HANDLE;
+     std::atomic<bool> m_bypass { false };
+diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
+index 0a5cf0e..5f8b31d 100644
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -85,6 +85,7 @@ namespace dxvk {
+ 
+ 
+   void DxvkPipelineManager::stopWorkerThreads() const {
++    m_cache->warmupGate().stop();
+     if (m_stateCache != nullptr)
+       m_stateCache->stopWorkerThreads();
+     m_cache->stop();
+diff --git a/src/dxvk/dxvk_pipemanager.h b/src/dxvk/dxvk_pipemanager.h
+index 3497fdb..0089ff5 100644
+--- a/src/dxvk/dxvk_pipemanager.h
++++ b/src/dxvk/dxvk_pipemanager.h
+@@ -96,6 +96,7 @@ namespace dxvk {
+      * \brief Stops async compiler threads
+      */
+     void stopWorkerThreads() const;
++    WarmupGate& warmupGate() const { return m_cache->warmupGate(); }
+     
+   private:
+     
+diff --git a/src/dxvk/dxvk_state_cache.cpp b/src/dxvk/dxvk_state_cache.cpp
+index 2d0ec2c..88cb52f 100644
+--- a/src/dxvk/dxvk_state_cache.cpp
++++ b/src/dxvk/dxvk_state_cache.cpp
+@@ -278,6 +278,7 @@ namespace dxvk {
+         workerLock = std::unique_lock<dxvk::mutex>(m_workerLock);
+       
+       m_workerQueue.push(item);
++      m_workerPending += 1;
+     }
+ 
+     if (workerLock) {
+@@ -923,14 +924,11 @@ namespace dxvk {
+       { std::unique_lock<dxvk::mutex> lock(m_workerLock);
+ 
+         if (m_workerQueue.empty()) {
+-          m_workerBusy -= 1;
+           m_workerCond.wait(lock, [this] () {
+             return m_workerQueue.size()
+                 || m_stopThreads.load();
+           });
+ 
+-          if (!m_workerQueue.empty())
+-            m_workerBusy += 1;
+         }
+ 
+         if (m_workerQueue.empty())
+@@ -941,6 +939,7 @@ namespace dxvk {
+       }
+ 
+       compilePipelines(item);
++      m_workerPending -= 1;
+     }
+   }
+ 
+@@ -993,8 +992,6 @@ namespace dxvk {
+       Logger::info(str::format("DXVK: Using ", numWorkers, " compiler threads"));
+ 
+       // Start the worker threads and the file writer
+-      m_workerBusy.store(numWorkers);
+-
+       for (uint32_t i = 0; i < numWorkers; i++) {
+         m_workerThreads.emplace_back([this] () { workerFunc(); });
+         m_workerThreads[i].set_priority(ThreadPriority::Lowest);
+diff --git a/src/dxvk/dxvk_state_cache.h b/src/dxvk/dxvk_state_cache.h
+index 5ab9b26..6abdbc0 100644
+--- a/src/dxvk/dxvk_state_cache.h
++++ b/src/dxvk/dxvk_state_cache.h
+@@ -81,7 +81,9 @@ namespace dxvk {
+      * \returns \c true if we're compiling shaders
+      */
+     bool isCompilingShaders() {
+-      return m_workerBusy.load() > 0;
++      // Include queued jobs, even before an idle worker wakes up. A fresh
++      // cache has no work and must never consume the startup wait budget.
++      return m_workerPending.load() > 0;
+     }
+ 
+   private:
+@@ -117,7 +119,7 @@ namespace dxvk {
+     dxvk::mutex                       m_workerLock;
+     dxvk::condition_variable          m_workerCond;
+     std::queue<WorkerItem>            m_workerQueue;
+-    std::atomic<uint32_t>             m_workerBusy;
++    std::atomic<uint32_t>             m_workerPending { 0 };
+     std::vector<dxvk::thread>         m_workerThreads;
+ 
+     dxvk::mutex                       m_writerLock;
+diff --git a/src/util/util_profile.cpp b/src/util/util_profile.cpp
+index 66ceeb0..11d3e52 100644
+--- a/src/util/util_profile.cpp
++++ b/src/util/util_profile.cpp
+@@ -4,6 +4,7 @@
+ #include <atomic>
+ #include <fstream>
+ #include <vector>
++#include <cstring>
+ 
+ namespace dxvk {
+   std::atomic<int32_t> profileState { -1 };
+@@ -20,7 +21,11 @@ namespace dxvk {
+         if (!file) { profileState.store(0); return; }
+         file << "event,thread,start_us,duration_us\n";
+         origin = Clock::now();
++        const auto requested = env::getEnvVar("DXVK_W101_PROFILE_SECONDS");
++        try { if (!requested.empty()) seconds = std::max(30, std::min(900, std::stoi(requested))); } catch (...) { }
+         pending.reserve(8192);
++        pendingPresentations.reserve(1024);
++        allFileReads = env::getEnvVar("DXVK_W101_PROFILE_ALL_READS") == "1";
+         profileState.store(1);
+         try { worker = dxvk::thread([this] {
+           try { write(); } catch (...) { profileState.store(0); }
+@@ -34,46 +39,84 @@ namespace dxvk {
+       }
+       void event(const char* name, Clock::time_point begin, Clock::time_point end) {
+         if (profileState.load(std::memory_order_relaxed) != 1) return;
+-        if (end - origin >= std::chrono::seconds(180)) {
++        if (end - origin >= std::chrono::seconds(seconds)) {
+           profileState.store(0); cond.notify_all(); return;
+         }
+-        // Producers never wait for disk or a contended profiling lock.
+-        std::unique_lock<dxvk::mutex> guard(lock, std::try_to_lock);
+-        if (!guard.owns_lock() || pending.size() >= 8192) { ++dropped; return; }
+-        pending.push_back({ name, this_thread::get_id(),
++        const bool presentation = !std::strcmp(name, "presentation");
++        if (!allFileReads && !std::strcmp(name, "game_read_file")
++         && end - begin < std::chrono::microseconds(100)) {
++          ++filteredShortFileReads; return;
++        }
++        // Near-zero background lock checks and queue admissions can flood a
++        // first-arrival capture. Keep real waits and count the filtered checks.
++        if (end - begin < std::chrono::microseconds(100)
++         && (!std::strcmp(name, "graphics_pipeline_background_lock_wait")
++          || !std::strcmp(name, "compute_pipeline_background_lock_wait")
++          || !std::strcmp(name, "submission_queue_throttle"))) {
++          ++filteredShortEvents; return;
++        }
++        // Frame timestamps have their own bounded queue. Busy compilation
++        // producers cannot evict them or contend for their profiling lock.
++        auto& queue = presentation ? pendingPresentations : pending;
++        auto& queueLock = presentation ? presentationLock : lock;
++        std::unique_lock<dxvk::mutex> guard(queueLock, std::try_to_lock);
++        if (!guard.owns_lock() || queue.size() >= (presentation ? 1024u : 8192u)) {
++          ++dropped; if (presentation) ++droppedPresentations; return;
++        }
++        queue.push_back({ name, this_thread::get_id(),
+           std::chrono::duration_cast<std::chrono::microseconds>(begin - origin).count(),
+           std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() });
+       }
+     private:
+       std::ofstream file;
+       dxvk::mutex lock;
++      dxvk::mutex presentationLock;
+       dxvk::condition_variable cond;
+       dxvk::thread worker;
+       std::vector<Event> pending;
++      std::vector<Event> pendingPresentations;
+       std::atomic<uint64_t> dropped { 0 };
++      std::atomic<uint64_t> droppedPresentations { 0 };
++      std::atomic<uint64_t> filteredShortEvents { 0 };
++      std::atomic<uint64_t> filteredShortFileReads { 0 };
++      int seconds = 180;
+       bool stop = false;
++      bool allFileReads = false;
+       void write() {
+         env::setThreadName("w101-timing-writer");
+         ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+         std::vector<Event> batch; batch.reserve(8192);
++        std::vector<Event> frames; frames.reserve(1024);
+         size_t bytes = 34;
+         for (;;) {
+           std::unique_lock<dxvk::mutex> guard(lock);
+-          cond.wait_until(guard, std::min(origin + std::chrono::seconds(180),
++          cond.wait_until(guard, std::min(origin + std::chrono::seconds(seconds),
+             Clock::now() + std::chrono::milliseconds(250)), [this] { return stop || profileState.load() != 1; });
+-          bool done = stop || profileState.load() != 1 || Clock::now() - origin >= std::chrono::seconds(180);
++          bool done = stop || profileState.load() != 1 || Clock::now() - origin >= std::chrono::seconds(seconds);
+           if (done) profileState.store(0);
+           pending.swap(batch);
+           guard.unlock();
+-          for (const auto& event : batch) {
+-            const auto row = std::string(event.name) + "," + std::to_string(event.tid) + ","
+-              + std::to_string(event.start) + "," + std::to_string(event.duration) + "\n";
+-            if (bytes + row.size() + 128 > 64u * 1024u * 1024u) { profileState.store(0); done = true; break; }
+-            file << row; bytes += row.size();
++          { std::lock_guard<dxvk::mutex> frameGuard(presentationLock); pendingPresentations.swap(frames); }
++          bool exhausted = false;
++          for (const auto* events : { &frames, &batch }) {
++            for (const auto& event : *events) {
++              const auto row = std::string(event.name) + "," + std::to_string(event.tid) + ","
++                + std::to_string(event.start) + "," + std::to_string(event.duration) + "\n";
++              if (exhausted || bytes + row.size() + 256 > 64u * 1024u * 1024u) {
++                profileState.store(0); done = true;
++                exhausted = true; ++dropped;
++                if (!std::strcmp(event.name, "presentation")) ++droppedPresentations;
++                continue;
++              }
++              file << row; bytes += row.size();
++            }
+           }
+-          batch.clear(); file.flush();
++          batch.clear(); frames.clear(); file.flush();
+           if (!file) { profileState.store(0); return; }
+-          if (done) { file << "# dropped_events=" << dropped.load() << "\n"; file.flush(); return; }
++          if (done) { file << "# dropped_events=" << dropped.load()
++            << "\n# dropped_presentations=" << droppedPresentations.load()
++            << "\n# filtered_short_events=" << filteredShortEvents.load()
++            << "\n# filtered_short_file_reads=" << filteredShortFileReads.load() << "\n"; file.flush(); return; }
+         }
+       }
+     };
+diff --git a/src/util/util_shader_revision.h b/src/util/util_shader_revision.h
+index b9ba0f2..0430cb3 100644
+--- a/src/util/util_shader_revision.h
++++ b/src/util/util_shader_revision.h
+@@ -1,2 +1,2 @@
+ #pragma once
+-#define W101_SHADER_REVISION "aa1859ec0a18d4efd5a254f3a7e05dbeea149517ab96fdd98208925049a32590"
++#define W101_SHADER_REVISION "6b282244c4d1c6c2e7c6adfa04a2abb75579a3a041d5a17e32bbb1360be45d3c"
+diff --git a/src/util/util_warmup.h b/src/util/util_warmup.h
+new file mode 100644
+index 0000000..b386fa0
+--- /dev/null
++++ b/src/util/util_warmup.h
+@@ -0,0 +1,64 @@
++#pragma once
++#include "thread.h"
++
++namespace dxvk {
++  // Foreground requests never wait for this gate. Only queued background work
++  // waits; a driver call already in flight cannot safely be preempted.
++  class WarmupGate {
++  public:
++    explicit WarmupGate(bool enabled) : m_enabled(enabled) { }
++    class Foreground {
++    public:
++      explicit Foreground(WarmupGate& gate, bool request = true)
++      : m_gate(gate), m_active(gate.m_enabled && request) {
++        if (m_active) {
++          std::lock_guard<dxvk::mutex> lock(m_gate.m_lock);
++          ++m_gate.m_foreground;
++        }
++      }
++      ~Foreground() {
++        if (m_active) {
++          std::lock_guard<dxvk::mutex> lock(m_gate.m_lock);
++          --m_gate.m_foreground; m_gate.m_cond.notify_all();
++        }
++      }
++    private:
++      WarmupGate& m_gate;
++      const bool m_active;
++    };
++    class Background {
++    public:
++      explicit Background(WarmupGate& gate, bool request = true)
++      : m_gate(gate), m_active(gate.m_enabled && request) {
++        if (!m_active) { m_acquired = true; return; }
++        std::unique_lock<dxvk::mutex> lock(m_gate.m_lock);
++        m_gate.m_cond.wait(lock, [&] {
++          return m_gate.m_stop || (!m_gate.m_foreground && !m_gate.m_background);
++        });
++        m_acquired = !m_gate.m_stop;
++        if (m_acquired) m_gate.m_background = true;
++      }
++      ~Background() {
++        if (m_active && m_acquired) {
++          std::lock_guard<dxvk::mutex> lock(m_gate.m_lock);
++          m_gate.m_background = false; m_gate.m_cond.notify_all();
++        }
++      }
++      explicit operator bool() const { return m_acquired; }
++    private:
++      WarmupGate& m_gate;
++      const bool m_active;
++      bool m_acquired = false;
++    };
++    void stop() {
++      std::lock_guard<dxvk::mutex> lock(m_lock);
++      m_stop = true; m_cond.notify_all();
++    }
++  private:
++    const bool m_enabled;
++    dxvk::mutex m_lock;
++    dxvk::condition_variable m_cond;
++    uint32_t m_foreground = 0;
++    bool m_background = false, m_stop = false;
++  };
++}

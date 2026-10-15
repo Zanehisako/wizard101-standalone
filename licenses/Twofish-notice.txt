@@ -1,0 +1,134 @@
+/*
+ * Fast, portable, and easy-to-use Twofish implementation, 
+ * Version 0.3.
+ * Copyright (c) 2002 by Niels Ferguson. 
+ * (See further down for the almost-unrestricted licensing terms.)
+ *
+ * --------------------------------------------------------------------------
+ * There are two files for this implementation:
+ * - twofish.h, the header file.
+ * - twofish.c, the code file.
+ *
+ * To incorporate this code into your program you should:
+ * - Check the licensing terms further down in this comment.
+ * - Fix the two type definitions in twofish.h to suit your platform.
+ * - Fix a few definitions in twofish.c in the section marked 
+ *   PLATFORM FIXES. There is one important ones that affects 
+ *   functionality, and then a few definitions that you can optimise 
+ *   for efficiency but those have no effect on the functionality. 
+ *   Don't change anything else.
+ * - Put the code in your project and compile it.
+ *
+ * To use this library you should:
+ * - Call Twofish_initialise() in your program before any other function in
+ *   this library.
+ * - Use Twofish_prepare_key(...) to convert a key to internal form.
+ * - Use Twofish_encrypt(...) and Twofish_decrypt(...) to encrypt and decrypt
+ *   data.
+ * See the comments in the header file for details on these functions.
+ * --------------------------------------------------------------------------
+ * 
+ * There are many Twofish implementation available for free on the web.
+ * Most of them are hard to integrate into your own program.
+ * As we like people to use our cipher, I thought I would make it easier. 
+ * Here is a free and easy-to-integrate Twofish implementation in C.
+ * The latest version is always available from my personal home page at
+ *    http://niels.ferguson.net/
+ *
+ * Integrating library code into a project is difficult because the library
+ * header files interfere with the project's header files and code. 
+ * And of course the project's header files interfere with the library code.
+ * I've tried to resolve these problems here. 
+ * The header file of this implementation is very light-weight. 
+ * It contains two typedefs, a structure, and a few function declarations.
+ * All names it defines start with "Twofish_". 
+ * The header file is therefore unlikely to cause problems in your project.
+ * The code file of this implementation doesn't need to include the header
+ * files of the project. There is thus no danger of the project interfering
+ * with all the definitions and macros of the Twofish code.
+ * In most situations, all you need to do is fill in a few platform-specific
+ * definitions in the header file and code file, 
+ * and you should be able to run the Twofish code in your project.
+ * I estimate it should take you less than an hour to integrate this code
+ * into your project, most of it spent reading the comments telling you what
+ * to do.
+ *
+ * For people using C++: it is very easy to wrap this library into a
+ * TwofishKey class. One of the big advantages is that you can automate the
+ * wiping of the key material in the destructor. I have not provided a C++
+ * class because the interface depends too much on the abstract base class 
+ * you use for block ciphers in your program, which I don't know about.
+ *
+ * This implementation is designed for use on PC-class machines. It uses the 
+ * Twofish 'full' keying option which uses large tables. Total table size is 
+ * around 5-6 kB for static tables plus 4.5 kB for each pre-processed key.
+ * If you need an implementation that uses less memory,
+ * take a look at Brian Gladman's code on his web site:
+ *     http://fp.gladman.plus.com/cryptography_technology/aes/
+ * He has code for all AES candidates.
+ * His Twofish code has lots of options trading off table size vs. speed.
+ * You can also take a look at the optimised code by Doug Whiting on the
+ * Twofish web site
+ *      http://www.counterpane.com/twofish.html
+ * which has loads of options.
+ * I believe these existing implementations are harder to re-use because they
+ * are not clean libraries and they impose requirements on the environment. 
+ * This implementation is very careful to minimise those, 
+ * and should be easier to integrate into any larger program.
+ *
+ * The default mode of this implementation is fully portable as it uses no
+ * behaviour not defined in the C standard. (This is harder than you think.)
+ * If you have any problems porting the default mode, please let me know
+ * so that I can fix the problem. (But only if this code is at fault, I 
+ * don't fix compilers.)
+ * Most of the platform fixes are related to non-portable but faster ways 
+ * of implementing certain functions.
+ *
+ * In general I've tried to make the code as fast as possible, at the expense
+ * of memory and code size. However, C does impose limits, and this 
+ * implementation will be slower than an optimised assembler implementation.
+ * But beware of assembler implementations: a good Pentium implementation
+ * uses completely different code than a good Pentium II implementation.
+ * You basically have to re-write the assembly code for every generation of
+ * processor. Unless you are severely pressed for speed, stick with C.
+ *
+ * The initialisation routine of this implementation contains a self-test.
+ * If initialisation succeeds without calling the fatal routine, then
+ * the implementation works. I don't think you can break the implementation
+ * in such a way that it still passes the tests, unless you are malicious.
+ * In other words: if the initialisation routine returns, 
+ * you have successfully ported the implementation. 
+ * (Or not implemented the fatal routine properly, but that is your problem.)
+ *
+ * I'm indebted to many people who helped me in one way or another to write
+ * this code. During the design of Twofish and the AES process I had very 
+ * extensive discussions of all implementation issues with various people.
+ * Doug Whiting in particular provided a wealth of information. The Twofish 
+ * team spent untold hours discussion various cipher features, and their 
+ * implementation. Brian Gladman implemented all AES candidates in C, 
+ * and we had some fruitful discussions on how to implement Twofish in C.
+ * Jan Nieuwenhuizen tested this code on Linux using GCC.
+ *
+ * Now for the license:
+ * The author hereby grants a perpetual license to everybody to
+ * use this code for any purpose as long as the copyright message is included
+ * in the source code of this or any derived work.
+ * 
+ * Yes, this means that you, your company, your club, and anyone else
+ * can use this code anywhere you want. You can change it and distribute it
+ * under the GPL, include it in your commercial product without releasing
+ * the source code, put it on the web, etc. 
+ * The only thing you cannot do is remove my copyright message, 
+ * or distribute any source code based on this implementation that does not 
+ * include my copyright message. 
+ * 
+ * I appreciate a mention in the documentation or credits, 
+ * but I understand if that is difficult to do.
+ * I also appreciate it if you tell me where and why you used my code.
+ *
+ * Please send any questions or comments to niels@ferguson.net
+ *
+ * Have Fun!
+ *
+ * Niels
+ */

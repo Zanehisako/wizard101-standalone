@@ -1,0 +1,479 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -538,7 +538,8 @@
+           IDirect3DTexture9** ppTexture,
+           HANDLE*             pSharedHandle) {
+     InitReturnPtr(ppTexture);
+-    ProfileScope profile("texture_create");
++    ProfileScope profile("texture_create", uint64_t(Width)*Height);
++    profileCount(WorkloadCounter::TextureCreates);
+ 
+     if (unlikely(ppTexture == nullptr))
+       return D3DERR_INVALIDCALL;
+@@ -605,6 +606,8 @@
+           D3DPOOL                   Pool,
+           IDirect3DVolumeTexture9** ppVolumeTexture,
+           HANDLE*                   pSharedHandle) {
++    ProfileScope textureProfile("texture_create_other");
++    profileCount(WorkloadCounter::TextureCreates);
+     InitReturnPtr(ppVolumeTexture);
+ 
+     if (unlikely(ppVolumeTexture == nullptr))
+@@ -662,6 +665,8 @@
+           D3DPOOL                 Pool,
+           IDirect3DCubeTexture9** ppCubeTexture,
+           HANDLE*                 pSharedHandle) {
++    ProfileScope textureProfile("texture_create_other");
++    profileCount(WorkloadCounter::TextureCreates);
+     InitReturnPtr(ppCubeTexture);
+ 
+     if (unlikely(ppCubeTexture == nullptr))
+@@ -2588,6 +2593,9 @@
+           D3DPRIMITIVETYPE PrimitiveType,
+           UINT             StartVertex,
+           UINT             PrimitiveCount) {
++    ProfileScope drawProfile("d3d9_draw", PrimitiveCount);
++    profileCount(WorkloadCounter::DrawCalls);
++    profileCount(WorkloadCounter::PrimitiveCount, PrimitiveCount);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(m_state.vertexDecl == nullptr))
+@@ -2638,6 +2646,9 @@
+           UINT             NumVertices,
+           UINT             StartIndex,
+           UINT             PrimitiveCount) {
++    ProfileScope drawProfile("d3d9_draw", PrimitiveCount);
++    profileCount(WorkloadCounter::DrawCalls);
++    profileCount(WorkloadCounter::PrimitiveCount, PrimitiveCount);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(m_state.vertexDecl == nullptr))
+@@ -2687,6 +2698,9 @@
+           UINT             PrimitiveCount,
+     const void*            pVertexStreamZeroData,
+           UINT             VertexStreamZeroStride) {
++    ProfileScope drawProfile("d3d9_draw", PrimitiveCount);
++    profileCount(WorkloadCounter::DrawCalls);
++    profileCount(WorkloadCounter::PrimitiveCount, PrimitiveCount);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(m_state.vertexDecl == nullptr))
+@@ -2739,6 +2753,9 @@
+           D3DFORMAT        IndexDataFormat,
+     const void*            pVertexStreamZeroData,
+           UINT             VertexStreamZeroStride) {
++    ProfileScope drawProfile("d3d9_draw", PrimitiveCount);
++    profileCount(WorkloadCounter::DrawCalls);
++    profileCount(WorkloadCounter::PrimitiveCount, PrimitiveCount);
+     D3D9DeviceLock lock = LockDevice();
+ 
+     if (unlikely(m_state.vertexDecl == nullptr))
+@@ -4385,6 +4402,8 @@
+   const Rc<DxvkResource>&                 Resource,
+         uint64_t                          SequenceNumber,
+         DWORD                             MapFlags) {
++    ProfileScope waitProfile("resource_gpu_wait");
++    profileCount(WorkloadCounter::WaitCalls);
+     // Wait for the any pending D3D9 command to be executed
+     // on the CS thread so that we can determine whether the
+     // resource is currently in use or not.
+@@ -4846,6 +4865,8 @@
+     // we need to copy its contents into the image
+ 
+     auto formatInfo = lookupFormatInfo(pDestTexture->GetFormatMapping().FormatColor);
++    const auto blocks = util::computeBlockCount(SrcExtent, formatInfo->blockSize);
++    profileCount(WorkloadCounter::TextureUploadBytes, uint64_t(blocks.width)*blocks.height*blocks.depth*formatInfo->elementSize);
+     auto srcSubresource = pSrcTexture->GetSubresourceFromIndex(
+       formatInfo->aspectMask, SrcSubresource);
+ 
+diff --git a/src/d3d9/wizard101_io_profile.h b/src/d3d9/wizard101_io_profile.h
+--- a/src/d3d9/wizard101_io_profile.h
++++ b/src/d3d9/wizard101_io_profile.h
+@@ -15,21 +15,49 @@
+   inline InternetRead gameInternetRead = nullptr;
+   inline BOOL WINAPI TimedReadFile(HANDLE file, LPVOID buffer, DWORD bytes,
+     LPDWORD read, LPOVERLAPPED overlapped) {
+-    DWORD error = GetLastError(); BOOL result;
+-    { ProfileScope profile("game_read_file");
+-      SetLastError(error); result = gameReadFile(file, buffer, bytes, read, overlapped);
+-      error = GetLastError();
+-    }
++    const DWORD incoming = GetLastError();
++    if (!profileEnabled()) { SetLastError(incoming); return gameReadFile(file,buffer,bytes,read,overlapped); }
++    const auto start=std::chrono::steady_clock::now(); SetLastError(incoming);
++    const BOOL result=gameReadFile(file,buffer,bytes,read,overlapped); const DWORD error=GetLastError();
++    const auto end=std::chrono::steady_clock::now();
++    // Pending overlapped reads are admissions, not completed disk waits.
++    const auto completed=result && read ? *read : 0;
++    profileCount(WorkloadCounter::ReadCalls); profileCount(WorkloadCounter::ReadBytes, completed);
++    if(!result) profileCount(error==ERROR_IO_PENDING?WorkloadCounter::ReadPending:WorkloadCounter::ReadFailures);
++    profileEvent(overlapped?"game_read_file_async_admission":"game_read_file",start,end,completed);
+     SetLastError(error); return result;
+   }
+   inline BOOL WINAPI TimedInternetRead(HANDLE file, LPVOID buffer, DWORD bytes, LPDWORD read) {
+-    DWORD error = GetLastError(); BOOL result;
+-    { ProfileScope profile("game_stream_read");
+-      SetLastError(error); result = gameInternetRead(file, buffer, bytes, read);
+-      error = GetLastError();
+-    }
++    const DWORD incoming=GetLastError();
++    if(!profileEnabled()) { SetLastError(incoming); return gameInternetRead(file,buffer,bytes,read); }
++    const auto start=std::chrono::steady_clock::now(); SetLastError(incoming);
++    const BOOL result=gameInternetRead(file,buffer,bytes,read); const DWORD error=GetLastError();
++    const auto end=std::chrono::steady_clock::now();
++    profileEvent("game_internet_read_file",start,end,result && read?*read:0);
+     SetLastError(error); return result;
+   }
++  inline decltype(&::WaitForSingleObject) originalWaitSingle=nullptr;
++  inline decltype(&::WaitForSingleObjectEx) originalWaitSingleEx=nullptr;
++  inline decltype(&::WaitForMultipleObjects) originalWaitMultiple=nullptr;
++  inline decltype(&::WaitForMultipleObjectsEx) originalWaitMultipleEx=nullptr;
++  inline decltype(&::EnterCriticalSection) originalCritical=nullptr;
++  template<class F, class... A> inline DWORD timedWait(F fn,A... args) {
++    DWORD incoming=GetLastError(),result,error;
++    if(!profileEnabled()) { SetLastError(incoming); return fn(args...); }
++    { ProfileScope scope("game_resource_wait"); profileCount(WorkloadCounter::WaitCalls);
++      SetLastError(incoming); result=fn(args...); error=GetLastError(); }
++    SetLastError(error); return result;
++  }
++  inline DWORD WINAPI waitSingle(HANDLE h,DWORD ms) { return timedWait(originalWaitSingle,h,ms); }
++  inline DWORD WINAPI waitSingleEx(HANDLE h,DWORD ms,BOOL alert) { return timedWait(originalWaitSingleEx,h,ms,alert); }
++  inline DWORD WINAPI waitMultiple(DWORD n,const HANDLE* h,BOOL all,DWORD ms) { return timedWait(originalWaitMultiple,n,h,all,ms); }
++  inline DWORD WINAPI waitMultipleEx(DWORD n,const HANDLE* h,BOOL all,DWORD ms,BOOL alert) { return timedWait(originalWaitMultipleEx,n,h,all,ms,alert); }
++  inline void WINAPI enterCritical(LPCRITICAL_SECTION section) {
++    const auto incoming=GetLastError(); DWORD error;
++    if(!profileEnabled()) { SetLastError(incoming); originalCritical(section); return; }
++    { ProfileScope scope("game_critical_section"); SetLastError(incoming); originalCritical(section); error=GetLastError(); }
++    SetLastError(error);
++  }
+   inline void InstallIoProfileHooks() {
+     if (env::getExeName() != "WizardGraphicalClient.exe" || !profileEnabled()) return;
+     static std::once_flag installed;
+@@ -46,7 +74,7 @@
+       for (; imports->Name; ++imports) {
+         if (!imports->OriginalFirstThunk) continue;
+         const auto dll = reinterpret_cast<const char*>(base + imports->Name);
+-        const bool kernel = !_stricmp(dll, "kernel32.dll"), internet = !_stricmp(dll, "wininet.dll");
++        const bool kernel = (!_stricmp(dll, "kernel32.dll") || !_stricmp(dll, "kernelbase.dll")), internet = !_stricmp(dll, "wininet.dll");
+         if (!kernel && !internet) continue;
+         auto names = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imports->OriginalFirstThunk);
+         auto slots = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imports->FirstThunk);
+@@ -61,6 +89,16 @@
+             gameInternetRead = reinterpret_cast<InternetRead>(slots->u1.Function);
+             replacement = reinterpret_cast<void*>(&TimedInternetRead);
+           }
++          if(kernel) {
++            const char* entry=reinterpret_cast<const char*>(name->Name);
++            #define W101_WAIT_HOOK(symbol,original,wrapper) if(!strcmp(entry,symbol)) { original=reinterpret_cast<decltype(original)>(slots->u1.Function); replacement=reinterpret_cast<void*>(&wrapper); }
++            W101_WAIT_HOOK("WaitForSingleObject",originalWaitSingle,waitSingle)
++            W101_WAIT_HOOK("WaitForSingleObjectEx",originalWaitSingleEx,waitSingleEx)
++            W101_WAIT_HOOK("WaitForMultipleObjects",originalWaitMultiple,waitMultiple)
++            W101_WAIT_HOOK("WaitForMultipleObjectsEx",originalWaitMultipleEx,waitMultipleEx)
++            W101_WAIT_HOOK("EnterCriticalSection",originalCritical,enterCritical)
++            #undef W101_WAIT_HOOK
++          }
+           if (!replacement) continue;
+           DWORD protection, ignored;
+           if (!VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), PAGE_READWRITE, &protection)) continue;
+@@ -68,7 +106,7 @@
+           VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), protection, &ignored); ++count;
+         }
+       }
+-      Logger::info(str::format("W101 profiling: installed ", count, " game read hooks"));
++      Logger::info(str::format("W101 profiling: installed ", count, " game read/wait hooks (main executable imports only; dynamic/module calls and mapped faults uncovered)"));
+     });
+   }
+ }
+diff --git a/src/dxvk/dxvk_compute.cpp b/src/dxvk/dxvk_compute.cpp
+--- a/src/dxvk/dxvk_compute.cpp
++++ b/src/dxvk/dxvk_compute.cpp
+@@ -11,6 +11,14 @@
+ #include "dxvk_state_cache.h"
+ 
+ namespace dxvk {
++  static ProfileContext captureIdentity(const DxvkComputePipelineShaders& shaders,
++      const DxvkComputePipelineStateInfo& state, const char* role) {
++    if (!profileEnabled()) return ProfileContext({}, {}, {}, role);
++    const auto key = shaders.cs->getShaderKey().toString();
++    const Sha1Data parts[] = {{key.data(), key.size()}, {&state, sizeof(state)}};
++    return ProfileContext(Sha1Hash::compute(2, parts).toString(), key, profileShaderCoverage(key), role);
++  }
++
+   
+   DxvkComputePipeline::DxvkComputePipeline(
+           DxvkPipelineManager*        pipeMgr,
+@@ -39,6 +47,8 @@
+     DxvkComputePipelineInstance* instance = this->findInstance(state);
+ 
+     if (unlikely(!instance)) {
++      auto identity = captureIdentity(m_shaders, state, "foreground");
++      ProfileScope request("compute_pipeline_foreground_request");
+       std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
+       { ProfileScope timing("compute_pipeline_foreground_lock_wait"); lock.lock(); }
+       instance = this->findInstance(state);
+@@ -55,6 +65,8 @@
+ 
+   void DxvkComputePipeline::compilePipeline(
+     const DxvkComputePipelineStateInfo& state) {
++    auto identity = captureIdentity(m_shaders, state, "background");
++    ProfileScope request("compute_pipeline_background_request");
+     std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
+     { ProfileScope timing("compute_pipeline_background_lock_wait"); lock.lock(); }
+ 
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -10,7 +10,26 @@
+ #include <fstream>
+ 
+ namespace dxvk {
++  static ProfileContext captureIdentity(const DxvkGraphicsPipelineShaders& shaders,
++      const DxvkGraphicsPipelineStateInfo& state, const DxvkRenderPass* pass, const char* role) {
++    if (!profileEnabled()) return ProfileContext({}, {}, {}, role);
++    std::string keys, coverage;
++    for (const auto& shader : {shaders.vs, shaders.tcs, shaders.tes, shaders.gs, shaders.fs}) {
++      if (shader == nullptr) continue;
++      const auto key = shader->getShaderKey().toString();
++      keys += (keys.empty() ? "" : ";") + key;
++      coverage += (coverage.empty() ? "" : ";") + profileShaderCoverage(key);
++    }
++    const auto format = pass->format();
++    // State vectors are the packed bytes used by the renderer's own equality.
++    // Serialize attachment fields explicitly; no render-pass pointer/padding.
++    std::string attachments = str::format(format.sampleCount, ":", format.depth.format, ":", format.depth.layout);
++    for (auto color : format.color) attachments += str::format(":", color.format, ":", color.layout);
++    const Sha1Data parts[] = {{keys.data(), keys.size()}, {&state, sizeof(state)}, {attachments.data(), attachments.size()}};
++    return ProfileContext(Sha1Hash::compute(3, parts).toString(), keys, coverage, role);
++  }
+ 
++
+   DxvkGraphicsPipeline::DxvkGraphicsPipeline(
+           DxvkPipelineManager*        pipeMgr,
+           DxvkGraphicsPipelineShaders shaders)
+@@ -70,6 +89,8 @@
+     DxvkGraphicsPipelineInstance* instance = this->findInstance(state, renderPass);
+ 
+     if (unlikely(!instance)) {
++      auto identity = captureIdentity(m_shaders, state, renderPass, "foreground");
++      ProfileScope request("graphics_pipeline_foreground_request");
+       // Exit early if the state vector is invalid
+       if (!this->validatePipelineState(state, true))
+         return VK_NULL_HANDLE;
+@@ -105,6 +126,8 @@
+     if (!this->validatePipelineState(state, false))
+       return false;
+ 
++    auto identity = captureIdentity(m_shaders, state, renderPass, "background");
++    ProfileScope request("graphics_pipeline_background_request");
+     // Keep the object locked while compiling a pipeline since compiling
+     // similar pipelines concurrently is fragile on some drivers
+     std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
+diff --git a/src/util/util_profile.cpp b/src/util/util_profile.cpp
+--- a/src/util/util_profile.cpp
++++ b/src/util/util_profile.cpp
+@@ -9,12 +9,14 @@
+ #include <array>
+ 
+ namespace dxvk {
++  std::array<std::atomic<uint64_t>, size_t(WorkloadCounter::Count)> workloadCounters {};
++  const char* workloadNames[] = {"draw_calls", "primitive_count", "read_calls", "read_bytes", "read_failures", "read_pending", "texture_creates", "texture_upload_bytes", "wait_calls"};
+   std::atomic<int32_t> profileState { -1 };
+   thread_local ProfileIdentity profileIdentity;
+   namespace {
+     using Clock = std::chrono::steady_clock;
+-    enum Category { Presentation, Pipeline, Shader, File, Texture, Submission, Pacing, Other, CategoryCount };
+-    const char* categoryNames[] = { "presentation", "pipeline", "shader", "file", "texture", "submission", "pacing", "other" };
++    enum Category { Presentation, Pipeline, Shader, File, Texture, Submission, Pacing, Resource, Other, CategoryCount };
++    const char* categoryNames[] = { "presentation", "pipeline", "shader", "file", "texture", "submission", "pacing", "resource", "other" };
+     Category category(const char* n) {
+       if (!std::strcmp(n, "presentation")) return Presentation;
+       if (std::strstr(n, "pipeline")) return Pipeline;
+@@ -23,11 +25,12 @@
+       if (std::strstr(n, "texture")) return Texture;
+       if (std::strstr(n, "submission") || std::strstr(n, "acquisition") || std::strstr(n, "queue_")) return Submission;
+       if (std::strstr(n, "frame_")) return Pacing;
++      if (std::strstr(n, "wait") || std::strstr(n, "sync")) return Resource;
+       return Other;
+     }
+     const char* aggregateNames[] = { "graphics_pipeline_background_lock_wait", "compute_pipeline_background_lock_wait",
+       "graphics_pipeline_background_request", "compute_pipeline_background_request", "submission_queue_throttle",
+-      "game_read_file", "game_internet_read_file" };
++      "game_read_file", "game_internet_read_file", "d3d9_draw", "game_resource_wait", "game_critical_section" };
+     struct Aggregate {
+       std::atomic<uint64_t> count {0}, total {0}, maximum {0};
+       void add(uint64_t us) {
+@@ -36,26 +39,38 @@
+         while (old < us && !maximum.compare_exchange_weak(old, us, std::memory_order_relaxed)) { }
+       }
+     };
+-    struct Event { const char* name; uint32_t tid; int64_t start, duration; Category cat; ProfileIdentity identity; };
++    struct Event { const char* name; uint32_t tid; int64_t start, duration; Category cat; ProfileIdentity identity; uint64_t units; };
+     dxvk::mutex shaderLock;
+     std::unordered_map<std::string, std::string> shaderCoverage;
+     class Recorder {
+     public:
+-      Clock::time_point origin;
++      Clock::time_point origin, deadline;
+       Recorder() {
+         const auto path = env::getEnvVar("DXVK_W101_PROFILE");
+         if (path.empty()) { profileState.store(0); return; }
+         file.open(path, std::ios::trunc | std::ios::binary);
+         if (!file) { profileState.store(0); return; }
+         origin = Clock::now();
+-        file << "# schema_version=2\n# thread_id_domain=wine_windows\n"
++        file << "# schema_version=3\n# thread_id_domain=wine_windows\n"
+              << "# pipeline_id_scope=same_renderer_state_and_renderpass\n"
+-             << "event,thread,start_us,duration_us,pipeline_id,shader_ids,coverage,role\n";
++             << "event,thread,start_us,duration_us,pipeline_id,shader_ids,coverage,role,work_units\n";
+         syncClock();
+         const auto requested = env::getEnvVar("DXVK_W101_PROFILE_SECONDS");
+         try { if (!requested.empty()) seconds = std::max(30, std::min(900, std::stoi(requested))); } catch (...) { }
++        deadline = origin + std::chrono::seconds(seconds);
++        const auto absolute = env::getEnvVar("W101_WORKLOAD_DEADLINE_UNIX_US");
++        if (!absolute.empty()) {
++          FILETIME t; GetSystemTimePreciseAsFileTime(&t);
++          const auto unixUs = ((uint64_t(t.dwHighDateTime)<<32)|t.dwLowDateTime)/10 - 11644473600000000ull;
++          try { const auto requested = std::stoull(absolute); deadline = std::min(deadline, Clock::now()+std::chrono::microseconds(requested>unixUs?requested-unixUs:0)); } catch (...) { }
++        }
++        const auto limit = env::getEnvVar("DXVK_W101_PROFILE_MAX_BYTES");
++        try { if (!limit.empty()) maxBytes = std::max<size_t>(16384, std::min(maxBytes, size_t(std::stoull(limit)))); } catch (...) { }
+         pending.reserve(8192); critical.reserve(8192); presentations.reserve(1024);
+         allFileReads = env::getEnvVar("DXVK_W101_PROFILE_ALL_READS") == "1";
++        file << "# workload_sample={\"relative_us\":0";
++        for(size_t i=0;i<size_t(WorkloadCounter::Count);++i) file << ",\"" << workloadNames[i] << "\":" << workloadCounters[i].load();
++        file << "}\n";
+         profileState.store(1);
+         try { worker = dxvk::thread([this] { try { write(); } catch (...) { profileState.store(0); } }); }
+         catch (...) { profileState.store(0); file.close(); }
+@@ -65,15 +80,15 @@
+         { std::lock_guard<dxvk::mutex> guard(lock); stop = true; cond.notify_all(); }
+         if (worker.joinable()) worker.join();
+       }
+-      void event(const char* name, Clock::time_point begin, Clock::time_point end) {
++      void event(const char* name, Clock::time_point begin, Clock::time_point end, uint64_t units) {
+         if (profileState.load(std::memory_order_relaxed) != 1) return;
+-        if (end - origin >= std::chrono::seconds(seconds)) { profileState.store(0); cond.notify_all(); return; }
++        if (end >= deadline) { profileState.store(0); cond.notify_all(); return; }
+         const auto cat = category(name);
+         const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+-        for (size_t i = 0; i < 7; ++i) {
+-          if (!std::strcmp(name, aggregateNames[i]) && duration < 100 && (i < 5 || !allFileReads)) {
++        for (size_t i = 0; i < 10; ++i) {
++          if (!std::strcmp(name, aggregateNames[i]) && duration < 100 && ((i < 5 || i >= 7) || !allFileReads)) {
+             aggregates[i].add(std::max<int64_t>(0, duration));
+-            if (i < 5) ++filteredShortEvents; else ++filteredShortFileReads;
++            if (i == 5 || i == 6) ++filteredShortFileReads; else ++filteredShortEvents;
+             return;
+           }
+         }
+@@ -84,7 +99,7 @@
+         if (!guard.owns_lock() || queue.size() >= (cat == Presentation ? 1024u : 8192u)) { ++loss[cat]; return; }
+         if (profileState.load(std::memory_order_relaxed) != 1) return;
+         queue.push_back({ name, ::GetCurrentThreadId(),
+-          std::chrono::duration_cast<std::chrono::microseconds>(begin - origin).count(), duration, cat, profileIdentity });
++          std::chrono::duration_cast<std::chrono::microseconds>(begin - origin).count(), duration, cat, profileIdentity, units });
+       }
+     private:
+       std::ofstream file;
+@@ -93,9 +108,10 @@
+       dxvk::thread worker;
+       std::vector<Event> pending, critical, presentations;
+       std::array<std::atomic<uint64_t>, CategoryCount> loss {};
+-      Aggregate aggregates[7];
++      Aggregate aggregates[10];
+       std::atomic<uint64_t> filteredShortEvents {0}, filteredShortFileReads {0};
+-      int seconds = 180;
++      int seconds = 900;
++      size_t maxBytes = 112u * 1024u * 1024u;
+       bool stop = false, allFileReads = false;
+       void syncClock() {
+         const auto before = Clock::now();
+@@ -114,7 +130,7 @@
+              << "\n# filtered_short_events=" << filteredShortEvents.load()
+              << "\n# filtered_short_file_reads=" << filteredShortFileReads.load() << '\n';
+         for (int i = 0; i < CategoryCount; ++i) file << "# dropped_category_" << categoryNames[i] << '=' << loss[i].load() << '\n';
+-        for (size_t i = 0; i < 7; ++i) file << "# aggregate_" << aggregateNames[i] << "={\"count\":" << aggregates[i].count.load()
++        for (size_t i = 0; i < 10; ++i) file << "# aggregate_" << aggregateNames[i] << "={\"count\":" << aggregates[i].count.load()
+           << ",\"total_us\":" << aggregates[i].total.load() << ",\"max_us\":" << aggregates[i].maximum.load() << "}\n";
+       }
+       void write() {
+@@ -123,12 +139,13 @@
+         std::vector<Event> batch, frames, important;
+         batch.reserve(8192); important.reserve(8192); frames.reserve(1024);
+         size_t bytes = size_t(file.tellp());
+-        auto nextSync = Clock::now() + std::chrono::seconds(1);
++        auto nextSync = Clock::now();
++        auto nextSample = Clock::now();
+         for (;;) {
+           std::unique_lock<dxvk::mutex> guard(lock);
+-          cond.wait_until(guard, std::min(origin + std::chrono::seconds(seconds), Clock::now() + std::chrono::milliseconds(250)),
++          cond.wait_until(guard, std::min(deadline, Clock::now() + std::chrono::milliseconds(250)),
+             [this] { return stop || profileState.load() != 1; });
+-          bool done = stop || profileState.load() != 1 || Clock::now() - origin >= std::chrono::seconds(seconds);
++          bool done = stop || profileState.load() != 1 || Clock::now() >= deadline;
+           if (done) profileState.store(0);
+           pending.swap(batch); guard.unlock();
+           { std::lock_guard<dxvk::mutex> frameGuard(frameLock); presentations.swap(frames); }
+@@ -137,14 +154,19 @@
+           for (const auto* events : { &frames, &important, &batch }) for (const auto& event : *events) {
+             const auto& id = event.identity;
+             const auto row = std::string(event.name) + "," + std::to_string(event.tid) + "," + std::to_string(event.start) + ","
+-              + std::to_string(event.duration) + "," + id.pipeline + "," + id.shaders + "," + id.coverage + "," + id.role + "\n";
+-            if (exhausted || bytes + row.size() + 8192 > 64u * 1024u * 1024u) {
++              + std::to_string(event.duration) + "," + id.pipeline + "," + id.shaders + "," + id.coverage + "," + id.role + "," + std::to_string(event.units) + "\n";
++            if (exhausted || bytes + row.size() + 8192 > maxBytes) {
+               profileState.store(0); done = true; exhausted = true; ++loss[event.cat]; continue;
+             }
+             file << row; bytes += row.size();
+           }
+           batch.clear(); frames.clear(); important.clear();
+-          if (Clock::now() >= nextSync && !exhausted) { syncClock(); bytes = size_t(file.tellp()); nextSync = Clock::now()+std::chrono::seconds(1); }
++          if (Clock::now() >= nextSync && !exhausted && !done) { syncClock(); bytes = size_t(file.tellp()); nextSync = Clock::now()+std::chrono::seconds(1); }
++          if (Clock::now() >= nextSample && !exhausted && !done) {
++            file << "# workload_sample={\"relative_us\":" << std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-origin).count();
++            for(size_t i=0;i<size_t(WorkloadCounter::Count);++i) file << ",\"" << workloadNames[i] << "\":" << workloadCounters[i].load();
++            file << "}\n"; bytes=size_t(file.tellp()); nextSample=Clock::now()+std::chrono::milliseconds(250);
++          }
+           file.flush();
+           if (!file) { profileState.store(0); return; }
+           if (done) { footer(); file.flush(); return; }
+@@ -181,5 +203,6 @@
+   void profileDeviceDestroyed() { if (devices.fetch_sub(1) == 1) recorder().shutdown(); }
+   void profileShutdown() { recorder().shutdown(); }
+   bool profileInitialize() { recorder(); return profileState.load(std::memory_order_relaxed) == 1; }
+-  void profileEvent(const char* name, Clock::time_point begin, Clock::time_point end) { recorder().event(name, begin, end); }
++  void profileEvent(const char* name, Clock::time_point begin, Clock::time_point end, uint64_t units) { recorder().event(name, begin, end, units); }
++  void profileCount(WorkloadCounter counter, uint64_t amount) { if(profileEnabled()) workloadCounters[size_t(counter)].fetch_add(amount, std::memory_order_relaxed); }
+ }
+diff --git a/src/util/util_profile.h b/src/util/util_profile.h
+--- a/src/util/util_profile.h
++++ b/src/util/util_profile.h
+@@ -15,7 +15,9 @@
+   void profileDeviceDestroyed();
+   void profileShutdown();
+   void profileEvent(const char* name, std::chrono::steady_clock::time_point begin,
+-    std::chrono::steady_clock::time_point end);
++    std::chrono::steady_clock::time_point end, uint64_t units = 0);
++  enum class WorkloadCounter { DrawCalls, PrimitiveCount, ReadCalls, ReadBytes, ReadFailures, ReadPending, TextureCreates, TextureUploadBytes, WaitCalls, Count };
++  void profileCount(WorkloadCounter counter, uint64_t amount = 1);
+   struct ProfileIdentity {
+     char pipeline[41] = {};
+     char shaders[256] = {};
+@@ -35,13 +37,14 @@
+   };
+   class ProfileScope {
+     const char* m_name;
++    uint64_t m_units;
+     std::chrono::steady_clock::time_point m_begin;
+   public:
+-    explicit ProfileScope(const char* name) : m_name(profileEnabled() ? name : nullptr) {
++    explicit ProfileScope(const char* name, uint64_t units = 0) : m_name(profileEnabled() ? name : nullptr), m_units(units) {
+       if (m_name) m_begin = std::chrono::steady_clock::now();
+     }
+     ~ProfileScope() {
+-      if (m_name) profileEvent(m_name, m_begin, std::chrono::steady_clock::now());
++      if (m_name) profileEvent(m_name, m_begin, std::chrono::steady_clock::now(), m_units);
+     }
+   };
+ }

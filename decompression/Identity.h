@@ -1,0 +1,4 @@
+#pragma once
+#define W101_GAME_SHA256 "544ab726ef7b920a5ccb67aa3d06b245db7e0012317d2fe7856d58c17c31cf7e"
+#define W101_ZLIB_SHA256 "e838d5f6179e47f82605f2b4d2fef895a7ba30dce3d0ac821db97a352cac1124"
+#define W101_ZLIB_DLL "zlib1v142x64.dll"

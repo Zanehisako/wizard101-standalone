@@ -1,0 +1,235 @@
+diff --git a/src/d3d9/d3d9_main.cpp b/src/d3d9/d3d9_main.cpp
+index 5fe02e0..22eced9 100644
+--- a/src/d3d9/d3d9_main.cpp
++++ b/src/d3d9/d3d9_main.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include "d3d9_annotation.h"
+ #include "wizard101_cursor.h"
++#include "wizard101_io_profile.h"
+ 
+ class D3DFE_PROCESSVERTICES;
+ using PSGPERRORID = UINT;
+@@ -21,6 +22,7 @@ namespace dxvk {
+ 
+ #ifdef _WIN32
+     wizard101::InstallCursorHook();
++    wizard101::InstallIoProfileHooks();
+ #endif
+     *ppDirect3D9Ex = ref(new D3D9InterfaceEx( Extended ));
+     return D3D_OK;
+diff --git a/src/d3d9/wizard101_io_profile.h b/src/d3d9/wizard101_io_profile.h
+new file mode 100644
+index 0000000..90f5b7b
+--- /dev/null
++++ b/src/d3d9/wizard101_io_profile.h
+@@ -0,0 +1,74 @@
++#pragma once
++#include "../util/util_profile.h"
++#include "../util/util_env.h"
++#include "../util/log/log.h"
++#include <windows.h>
++#include <cstring>
++#include <mutex>
++
++namespace dxvk::wizard101 {
++  // Opt-in timings of the game's own disk/stream reads. No filenames, file
++  // contents, handles, network payloads or credentials are recorded. Mapped
++  // file faults, decompression and game-side work remain outside this capture.
++  inline decltype(&::ReadFile) gameReadFile = nullptr;
++  using InternetRead = BOOL (WINAPI*)(HANDLE, LPVOID, DWORD, LPDWORD);
++  inline InternetRead gameInternetRead = nullptr;
++  inline BOOL WINAPI TimedReadFile(HANDLE file, LPVOID buffer, DWORD bytes,
++    LPDWORD read, LPOVERLAPPED overlapped) {
++    DWORD error = GetLastError(); BOOL result;
++    { ProfileScope profile("game_read_file");
++      SetLastError(error); result = gameReadFile(file, buffer, bytes, read, overlapped);
++      error = GetLastError();
++    }
++    SetLastError(error); return result;
++  }
++  inline BOOL WINAPI TimedInternetRead(HANDLE file, LPVOID buffer, DWORD bytes, LPDWORD read) {
++    DWORD error = GetLastError(); BOOL result;
++    { ProfileScope profile("game_stream_read");
++      SetLastError(error); result = gameInternetRead(file, buffer, bytes, read);
++      error = GetLastError();
++    }
++    SetLastError(error); return result;
++  }
++  inline void InstallIoProfileHooks() {
++    if (env::getExeName() != "WizardGraphicalClient.exe" || !profileEnabled()) return;
++    static std::once_flag installed;
++    std::call_once(installed, [] {
++      auto base = reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
++      auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
++      if (!base || dos->e_magic != IMAGE_DOS_SIGNATURE) return;
++      auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
++      if (nt->Signature != IMAGE_NT_SIGNATURE) return;
++      const auto dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
++      if (!dir.VirtualAddress) return;
++      auto imports = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
++      uint32_t count = 0;
++      for (; imports->Name; ++imports) {
++        if (!imports->OriginalFirstThunk) continue;
++        const auto dll = reinterpret_cast<const char*>(base + imports->Name);
++        const bool kernel = !_stricmp(dll, "kernel32.dll"), internet = !_stricmp(dll, "wininet.dll");
++        if (!kernel && !internet) continue;
++        auto names = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imports->OriginalFirstThunk);
++        auto slots = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imports->FirstThunk);
++        for (; names->u1.AddressOfData; ++names, ++slots) {
++          if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
++          const auto name = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData);
++          void* replacement = nullptr;
++          if (kernel && !strcmp(reinterpret_cast<const char*>(name->Name), "ReadFile")) {
++            gameReadFile = reinterpret_cast<decltype(gameReadFile)>(slots->u1.Function);
++            replacement = reinterpret_cast<void*>(&TimedReadFile);
++          } else if (internet && !strcmp(reinterpret_cast<const char*>(name->Name), "InternetReadFile")) {
++            gameInternetRead = reinterpret_cast<InternetRead>(slots->u1.Function);
++            replacement = reinterpret_cast<void*>(&TimedInternetRead);
++          }
++          if (!replacement) continue;
++          DWORD protection, ignored;
++          if (!VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), PAGE_READWRITE, &protection)) continue;
++          InterlockedExchangePointer(reinterpret_cast<void* volatile*>(&slots->u1.Function), replacement);
++          VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), protection, &ignored); ++count;
++        }
++      }
++      Logger::info(str::format("W101 profiling: installed ", count, " game read hooks"));
++    });
++  }
++}
+diff --git a/src/dxvk/dxvk_pipecache.cpp b/src/dxvk/dxvk_pipecache.cpp
+index a5002f2..04af10a 100644
+--- a/src/dxvk/dxvk_pipecache.cpp
++++ b/src/dxvk/dxvk_pipecache.cpp
+@@ -26,6 +26,7 @@ namespace dxvk {
+     if (dirOverride.empty()) env::createDirectory("C:\\graphics-patch-cache");
+     env::createDirectory(dir);
+     m_path = dir + "/" + m_key.toString() + ".vkcache";
++    ProfileScope loadTiming("pipeline_cache_load");
+     std::vector<char> data;
+     const bool loaded = cachefile::read(m_path, m_key, data);
+     if (loaded) {
+diff --git a/src/util/util_profile.cpp b/src/util/util_profile.cpp
+index 66ceeb0..11d3e52 100644
+--- a/src/util/util_profile.cpp
++++ b/src/util/util_profile.cpp
+@@ -4,6 +4,7 @@
+ #include <atomic>
+ #include <fstream>
+ #include <vector>
++#include <cstring>
+ 
+ namespace dxvk {
+   std::atomic<int32_t> profileState { -1 };
+@@ -20,7 +21,11 @@ namespace dxvk {
+         if (!file) { profileState.store(0); return; }
+         file << "event,thread,start_us,duration_us\n";
+         origin = Clock::now();
++        const auto requested = env::getEnvVar("DXVK_W101_PROFILE_SECONDS");
++        try { if (!requested.empty()) seconds = std::max(30, std::min(900, std::stoi(requested))); } catch (...) { }
+         pending.reserve(8192);
++        pendingPresentations.reserve(1024);
++        allFileReads = env::getEnvVar("DXVK_W101_PROFILE_ALL_READS") == "1";
+         profileState.store(1);
+         try { worker = dxvk::thread([this] {
+           try { write(); } catch (...) { profileState.store(0); }
+@@ -34,46 +39,84 @@ namespace dxvk {
+       }
+       void event(const char* name, Clock::time_point begin, Clock::time_point end) {
+         if (profileState.load(std::memory_order_relaxed) != 1) return;
+-        if (end - origin >= std::chrono::seconds(180)) {
++        if (end - origin >= std::chrono::seconds(seconds)) {
+           profileState.store(0); cond.notify_all(); return;
+         }
+-        // Producers never wait for disk or a contended profiling lock.
+-        std::unique_lock<dxvk::mutex> guard(lock, std::try_to_lock);
+-        if (!guard.owns_lock() || pending.size() >= 8192) { ++dropped; return; }
+-        pending.push_back({ name, this_thread::get_id(),
++        const bool presentation = !std::strcmp(name, "presentation");
++        if (!allFileReads && !std::strcmp(name, "game_read_file")
++         && end - begin < std::chrono::microseconds(100)) {
++          ++filteredShortFileReads; return;
++        }
++        // Near-zero background lock checks and queue admissions can flood a
++        // first-arrival capture. Keep real waits and count the filtered checks.
++        if (end - begin < std::chrono::microseconds(100)
++         && (!std::strcmp(name, "graphics_pipeline_background_lock_wait")
++          || !std::strcmp(name, "compute_pipeline_background_lock_wait")
++          || !std::strcmp(name, "submission_queue_throttle"))) {
++          ++filteredShortEvents; return;
++        }
++        // Frame timestamps have their own bounded queue. Busy compilation
++        // producers cannot evict them or contend for their profiling lock.
++        auto& queue = presentation ? pendingPresentations : pending;
++        auto& queueLock = presentation ? presentationLock : lock;
++        std::unique_lock<dxvk::mutex> guard(queueLock, std::try_to_lock);
++        if (!guard.owns_lock() || queue.size() >= (presentation ? 1024u : 8192u)) {
++          ++dropped; if (presentation) ++droppedPresentations; return;
++        }
++        queue.push_back({ name, this_thread::get_id(),
+           std::chrono::duration_cast<std::chrono::microseconds>(begin - origin).count(),
+           std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() });
+       }
+     private:
+       std::ofstream file;
+       dxvk::mutex lock;
++      dxvk::mutex presentationLock;
+       dxvk::condition_variable cond;
+       dxvk::thread worker;
+       std::vector<Event> pending;
++      std::vector<Event> pendingPresentations;
+       std::atomic<uint64_t> dropped { 0 };
++      std::atomic<uint64_t> droppedPresentations { 0 };
++      std::atomic<uint64_t> filteredShortEvents { 0 };
++      std::atomic<uint64_t> filteredShortFileReads { 0 };
++      int seconds = 180;
+       bool stop = false;
++      bool allFileReads = false;
+       void write() {
+         env::setThreadName("w101-timing-writer");
+         ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+         std::vector<Event> batch; batch.reserve(8192);
++        std::vector<Event> frames; frames.reserve(1024);
+         size_t bytes = 34;
+         for (;;) {
+           std::unique_lock<dxvk::mutex> guard(lock);
+-          cond.wait_until(guard, std::min(origin + std::chrono::seconds(180),
++          cond.wait_until(guard, std::min(origin + std::chrono::seconds(seconds),
+             Clock::now() + std::chrono::milliseconds(250)), [this] { return stop || profileState.load() != 1; });
+-          bool done = stop || profileState.load() != 1 || Clock::now() - origin >= std::chrono::seconds(180);
++          bool done = stop || profileState.load() != 1 || Clock::now() - origin >= std::chrono::seconds(seconds);
+           if (done) profileState.store(0);
+           pending.swap(batch);
+           guard.unlock();
+-          for (const auto& event : batch) {
+-            const auto row = std::string(event.name) + "," + std::to_string(event.tid) + ","
+-              + std::to_string(event.start) + "," + std::to_string(event.duration) + "\n";
+-            if (bytes + row.size() + 128 > 64u * 1024u * 1024u) { profileState.store(0); done = true; break; }
+-            file << row; bytes += row.size();
++          { std::lock_guard<dxvk::mutex> frameGuard(presentationLock); pendingPresentations.swap(frames); }
++          bool exhausted = false;
++          for (const auto* events : { &frames, &batch }) {
++            for (const auto& event : *events) {
++              const auto row = std::string(event.name) + "," + std::to_string(event.tid) + ","
++                + std::to_string(event.start) + "," + std::to_string(event.duration) + "\n";
++              if (exhausted || bytes + row.size() + 256 > 64u * 1024u * 1024u) {
++                profileState.store(0); done = true;
++                exhausted = true; ++dropped;
++                if (!std::strcmp(event.name, "presentation")) ++droppedPresentations;
++                continue;
++              }
++              file << row; bytes += row.size();
++            }
+           }
+-          batch.clear(); file.flush();
++          batch.clear(); frames.clear(); file.flush();
+           if (!file) { profileState.store(0); return; }
+-          if (done) { file << "# dropped_events=" << dropped.load() << "\n"; file.flush(); return; }
++          if (done) { file << "# dropped_events=" << dropped.load()
++            << "\n# dropped_presentations=" << droppedPresentations.load()
++            << "\n# filtered_short_events=" << filteredShortEvents.load()
++            << "\n# filtered_short_file_reads=" << filteredShortFileReads.load() << "\n"; file.flush(); return; }
+         }
+       }
+     };

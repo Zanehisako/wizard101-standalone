@@ -1,0 +1,1593 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 6d633814..37c5094f 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_profile.h"
+ #include "d3d9_device.h"
+ 
+ #include "d3d9_annotation.h"
+@@ -537,6 +538,7 @@ namespace dxvk {
+           IDirect3DTexture9** ppTexture,
+           HANDLE*             pSharedHandle) {
+     InitReturnPtr(ppTexture);
++    ProfileScope profile("texture_create");
+ 
+     if (unlikely(ppTexture == nullptr))
+       return D3DERR_INVALIDCALL;
+@@ -4181,7 +4183,7 @@ namespace dxvk {
+     enabled.core.features.textureCompressionBC = VK_TRUE;
+ 
+     enabled.extDepthClipEnable.depthClipEnable = supported.extDepthClipEnable.depthClipEnable;
+-    enabled.extHostQueryReset.hostQueryReset = VK_TRUE;
++    enabled.extHostQueryReset.hostQueryReset = supported.extHostQueryReset.hostQueryReset;
+ 
+     // SM2 level hardware
+     enabled.core.features.occlusionQueryPrecise = VK_TRUE;
+@@ -4340,6 +4342,7 @@ namespace dxvk {
+         if (!needsStall)
+           break;
+ 
++        ProfileScope profile("staging_buffer_throttle");
+         SynchronizeCsThread(payload.sequenceNumber);
+         lastSequenceNumber = payload.sequenceNumber;
+       }
+@@ -4353,6 +4356,7 @@ namespace dxvk {
+           didFlush = true;
+         }
+ 
++        ProfileScope profile("staging_buffer_throttle");
+         m_dxvkDevice->waitForResource(marker, DxvkAccess::Read);
+       }
+ 
+@@ -4833,6 +4837,7 @@ namespace dxvk {
+     VkOffset3D SrcOffset,
+     VkExtent3D SrcExtent,
+     VkOffset3D DestOffset) {
++    ProfileScope profile("texture_upload_queue");
+     WaitStagingBuffer();
+ 
+     const Rc<DxvkImage> image = pDestTexture->GetImage();
+@@ -5420,6 +5425,7 @@ namespace dxvk {
+ 
+ 
+   void D3D9DeviceEx::SynchronizeCsThread(uint64_t SequenceNumber) {
++    ProfileScope profile("command_thread_sync");
+     D3D9DeviceLock lock = LockDevice();
+ 
+     // Dispatch current chunk so that all commands
+diff --git a/src/d3d9/d3d9_main.cpp b/src/d3d9/d3d9_main.cpp
+index 9e7aaa24..5fe02e08 100644
+--- a/src/d3d9/d3d9_main.cpp
++++ b/src/d3d9/d3d9_main.cpp
+@@ -4,6 +4,7 @@
+ #include "d3d9_shader_validator.h"
+ 
+ #include "d3d9_annotation.h"
++#include "wizard101_cursor.h"
+ 
+ class D3DFE_PROCESSVERTICES;
+ using PSGPERRORID = UINT;
+@@ -18,6 +19,9 @@ namespace dxvk {
+     if (!ppDirect3D9Ex)
+       return D3DERR_INVALIDCALL;
+ 
++#ifdef _WIN32
++    wizard101::InstallCursorHook();
++#endif
+     *ppDirect3D9Ex = ref(new D3D9InterfaceEx( Extended ));
+     return D3D_OK;
+   }
+diff --git a/src/d3d9/d3d9_shader.cpp b/src/d3d9/d3d9_shader.cpp
+index 1cc5ec81..ef36946b 100644
+--- a/src/d3d9/d3d9_shader.cpp
++++ b/src/d3d9/d3d9_shader.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_profile.h"
+ #include "d3d9_shader.h"
+ 
+ #include "d3d9_caps.h"
+@@ -32,7 +33,7 @@ namespace dxvk {
+       reader.store(std::ofstream(str::topath(str::format(dumpPath, "/", name, ".dxso").c_str()).c_str(),
+         std::ios_base::binary | std::ios_base::trunc), bytecodeLength);
+ 
+-      char comment[2048];
++      char comment[2048] = {};
+       Com<ID3DBlob> blob;
+       HRESULT hr = DisassembleShader(
+         pShaderBytecode,
+@@ -54,7 +55,9 @@ namespace dxvk {
+     const D3D9ConstantLayout& constantLayout = ShaderStage == VK_SHADER_STAGE_VERTEX_BIT
+       ? pDevice->GetVertexConstantLayout()
+       : pDevice->GetPixelConstantLayout();
+-    m_shaders      = pModule->compile(*pDxsoModuleInfo, name, AnalysisInfo, constantLayout);
++    { ProfileScope profile("shader_translation");
++      m_shaders = pModule->compile(*pDxsoModuleInfo, name, AnalysisInfo, constantLayout);
++    }
+     m_isgn         = pModule->isgn();
+     m_usedSamplers = pModule->usedSamplers();
+ 
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index 914f7066..20327503 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_profile.h"
+ #include "d3d9_swapchain.h"
+ #include "d3d9_surface.h"
+ #include "d3d9_monitor.h"
+@@ -257,6 +258,7 @@ namespace dxvk {
+           HWND     hDestWindowOverride,
+     const RGNDATA* pDirtyRegion,
+           DWORD    dwFlags) {
++    ProfileScope profile("presentation");
+     D3D9DeviceLock lock = m_parent->LockDevice();
+ 
+     uint32_t presentInterval = m_presentParams.PresentationInterval;
+@@ -1170,6 +1172,7 @@ namespace dxvk {
+ 
+ 
+   void D3D9SwapChainEx::SyncFrameLatency() {
++    ProfileScope profile("frame_latency_wait");
+     // Wait for the sync event so that we respect the maximum frame latency
+     m_frameLatencySignal->wait(m_frameId - GetActualFrameLatency());
+   }
+diff --git a/src/d3d9/wizard101_cursor.h b/src/d3d9/wizard101_cursor.h
+new file mode 100644
+index 00000000..dcfeeb84
+--- /dev/null
++++ b/src/d3d9/wizard101_cursor.h
+@@ -0,0 +1,114 @@
++#pragma once
++
++// Wizard101's hardware cursor bypasses IDirect3DDevice9::SetCursorProperties.
++// Scale the file-loaded custom cursor once, before the game owns its handle.
++// This changes only the main executable's import, never USER32 globally.
++#ifdef _WIN32
++#include <windows.h>
++#include <cstring>
++#include <cwchar>
++#include <mutex>
++
++namespace dxvk {
++namespace wizard101 {
++
++inline HCURSOR WINAPI LoadLargeCursor(LPCSTR filename) {
++  HCURSOR original = ::LoadCursorFromFileA(filename);
++  if (!original)
++    return nullptr;
++
++  ICONINFO info = {};
++  if (!::GetIconInfo(original, &info))
++    return original;
++  BITMAP bitmap = {};
++  bool color = info.hbmColor != nullptr;
++  bool valid = ::GetObjectW(color ? info.hbmColor : info.hbmMask,
++    sizeof(bitmap), &bitmap) != 0;
++  if (info.hbmColor) ::DeleteObject(info.hbmColor);
++  if (info.hbmMask) ::DeleteObject(info.hbmMask);
++  int width = bitmap.bmWidth;
++  int height = color ? bitmap.bmHeight : bitmap.bmHeight / 2;
++  if (!valid || width <= 0 || height <= 0 || width > 128 || height > 128)
++    return original;
++
++  HCURSOR scaled = static_cast<HCURSOR>(::CopyImage(original, IMAGE_CURSOR,
++    width * 2, height * 2, 0));
++  if (!scaled || scaled == original)
++    return original;
++  // Wine's CopyImage enlarges the bitmap but retains the original hotspot.
++  // Recreate with doubled coordinates so clicks stay on the visible tip.
++  ICONINFO scaledInfo = {};
++  if (!::GetIconInfo(scaled, &scaledInfo)) {
++    ::DestroyCursor(scaled);
++    return original;
++  }
++  scaledInfo.fIcon = FALSE;
++  scaledInfo.xHotspot = info.xHotspot * 2;
++  scaledInfo.yHotspot = info.yHotspot * 2;
++  HCURSOR result = static_cast<HCURSOR>(::CreateIconIndirect(&scaledInfo));
++  if (scaledInfo.hbmColor) ::DeleteObject(scaledInfo.hbmColor);
++  if (scaledInfo.hbmMask) ::DeleteObject(scaledInfo.hbmMask);
++  ::DestroyCursor(scaled);
++  if (!result)
++    return original;
++  ::DestroyCursor(original);
++  return result;
++}
++
++inline void InstallCursorHook() {
++  static std::once_flag once;
++  std::call_once(once, [] {
++    HMODULE module = ::GetModuleHandleW(nullptr);
++    wchar_t path[MAX_PATH] = {};
++    DWORD length = ::GetModuleFileNameW(module, path, MAX_PATH);
++    if (!length || length >= MAX_PATH)
++      return;
++    const wchar_t* filename = std::wcsrchr(path, L'\\');
++    filename = filename ? filename + 1 : path;
++    if (::_wcsicmp(filename, L"WizardGraphicalClient.exe"))
++      return;
++
++    auto base = reinterpret_cast<unsigned char*>(module);
++    auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
++    if (dos->e_magic != IMAGE_DOS_SIGNATURE)
++      return;
++    auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
++    if (nt->Signature != IMAGE_NT_SIGNATURE)
++      return;
++    auto directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
++    if (!directory.VirtualAddress)
++      return;
++    auto imports = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + directory.VirtualAddress);
++    for (; imports->Name; ++imports) {
++      if (::_stricmp(reinterpret_cast<const char*>(base + imports->Name), "user32.dll")
++          || !imports->OriginalFirstThunk)
++        continue;
++      auto names = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imports->OriginalFirstThunk);
++      auto slots = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imports->FirstThunk);
++      for (; names->u1.AddressOfData; ++names, ++slots) {
++        if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal))
++          continue;
++        auto name = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData);
++        if (std::strcmp(reinterpret_cast<const char*>(name->Name), "LoadCursorFromFileA"))
++          continue;
++        DWORD protection = 0;
++        if (!::VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function),
++                             PAGE_READWRITE, &protection)) {
++          Logger::warn("Wizard101 cursor: cannot install file-loader hook");
++          return;
++        }
++        ::InterlockedExchangePointer(reinterpret_cast<void* volatile*>(&slots->u1.Function),
++          reinterpret_cast<void*>(&LoadLargeCursor));
++        DWORD ignored = 0;
++        ::VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), protection, &ignored);
++        Logger::info("Wizard101 cursor: custom cursor images enlarged 2x");
++        return;
++      }
++    }
++    Logger::warn("Wizard101 cursor: file-loader import not found");
++  });
++}
++
++}
++}
++#endif
+diff --git a/src/dxvk/dxvk_adapter.cpp b/src/dxvk/dxvk_adapter.cpp
+index f83cd796..6c525720 100644
+--- a/src/dxvk/dxvk_adapter.cpp
++++ b/src/dxvk/dxvk_adapter.cpp
+@@ -267,7 +267,7 @@ namespace dxvk {
+           DxvkDeviceFeatures  enabledFeatures) {
+     DxvkDeviceExtensions devExtensions;
+ 
+-    std::array<DxvkExt*, 32> devExtensionList = {{
++    std::array<DxvkExt*, 33> devExtensionList = {{
+       &devExtensions.amdMemoryOverallocationBehaviour,
+       &devExtensions.amdShaderFragmentMask,
+       &devExtensions.ext4444Formats,
+@@ -294,6 +294,7 @@ namespace dxvk {
+       &devExtensions.khrExternalMemoryWin32,
+       &devExtensions.khrExternalSemaphoreWin32,
+       &devExtensions.khrImageFormatList,
++      &devExtensions.khrPortabilitySubset,
+       &devExtensions.khrSamplerMirrorClampToEdge,
+       &devExtensions.khrShaderFloatControls,
+       &devExtensions.khrSwapchain,
+@@ -347,6 +348,10 @@ namespace dxvk {
+     this->logNameList(extensionNameList);
+     this->logFeatures(enabledFeatures);
+ 
++    // Reject unsupported requirements instead of silently changing rendering.
++    if (!checkFeatureSupport(enabledFeatures))
++      throw DxvkError("DxvkAdapter: requested rendering features are not supported by the driver");
++
+     // Create pNext chain for additional device features
+     enabledFeatures.core.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2_KHR;
+     enabledFeatures.core.pNext = nullptr;
+@@ -419,6 +424,13 @@ namespace dxvk {
+       enabledFeatures.khrTimelineSemaphore.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.khrTimelineSemaphore);
+     }
+ 
++    if (devExtensions.khrPortabilitySubset) {
++      // This extension must be enabled when advertised. Enable only the
++      // portability features returned by vkGetPhysicalDeviceFeatures2.
++      enabledFeatures.khrPortabilitySubset = m_deviceFeatures.khrPortabilitySubset;
++      enabledFeatures.khrPortabilitySubset.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.khrPortabilitySubset);
++    }
++
+     // Report the desired overallocation behaviour to the driver
+     VkDeviceMemoryOverallocationCreateInfoAMD overallocInfo;
+     overallocInfo.sType = VK_STRUCTURE_TYPE_DEVICE_MEMORY_OVERALLOCATION_CREATE_INFO_AMD;
+@@ -488,7 +500,7 @@ namespace dxvk {
+     }
+ 
+     if (vr != VK_SUCCESS)
+-      throw DxvkError("DxvkAdapter: Failed to create device");
++      throw DxvkError(str::format("DxvkAdapter: Failed to create device, VkResult=", vr));
+     
+     Rc<DxvkDevice> result = new DxvkDevice(instance, this,
+       new vk::DeviceFn(m_vki, true, device),
+@@ -739,6 +751,11 @@ namespace dxvk {
+       m_deviceFeatures.khrTimelineSemaphore.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.khrTimelineSemaphore);
+     }
+ 
++    if (m_deviceExtensions.supports(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
++      m_deviceFeatures.khrPortabilitySubset.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
++      m_deviceFeatures.khrPortabilitySubset.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.khrPortabilitySubset);
++    }
++
+     m_vki->vkGetPhysicalDeviceFeatures2(m_handle, &m_deviceFeatures.core);
+   }
+ 
+diff --git a/src/dxvk/dxvk_cmdlist.cpp b/src/dxvk/dxvk_cmdlist.cpp
+index 565b9a75..2748e588 100644
+--- a/src/dxvk/dxvk_cmdlist.cpp
++++ b/src/dxvk/dxvk_cmdlist.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_profile.h"
+ #include "dxvk_cmdlist.h"
+ #include "dxvk_device.h"
+ 
+@@ -126,6 +127,7 @@ namespace dxvk {
+   
+   
+   VkResult DxvkCommandList::synchronize() {
++    ProfileScope profile("submission_fence_wait");
+     VkResult status = VK_TIMEOUT;
+     
+     while (status == VK_TIMEOUT) {
+diff --git a/src/dxvk/dxvk_compute.cpp b/src/dxvk/dxvk_compute.cpp
+index 4e060908..fc600d13 100644
+--- a/src/dxvk/dxvk_compute.cpp
++++ b/src/dxvk/dxvk_compute.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_profile.h"
+ #include <cstring>
+ 
+ #include "../util/util_time.h"
+@@ -6,6 +7,7 @@
+ #include "dxvk_device.h"
+ #include "dxvk_pipemanager.h"
+ #include "dxvk_spec_const.h"
++#include "../vulkan/vulkan_diagnostics.h"
+ #include "dxvk_state_cache.h"
+ 
+ namespace dxvk {
+@@ -37,7 +39,8 @@ namespace dxvk {
+     DxvkComputePipelineInstance* instance = this->findInstance(state);
+ 
+     if (unlikely(!instance)) {
+-      std::lock_guard<dxvk::mutex> lock(m_mutex);
++      std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
++      { ProfileScope timing("compute_pipeline_foreground_lock_wait"); lock.lock(); }
+       instance = this->findInstance(state);
+ 
+       if (!instance) {
+@@ -52,7 +55,8 @@ namespace dxvk {
+ 
+   void DxvkComputePipeline::compilePipeline(
+     const DxvkComputePipelineStateInfo& state) {
+-    std::lock_guard<dxvk::mutex> lock(m_mutex);
++    std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
++    { ProfileScope timing("compute_pipeline_background_lock_wait"); lock.lock(); }
+ 
+     if (!this->findInstance(state))
+       this->createInstance(state);
+@@ -81,6 +85,7 @@ namespace dxvk {
+   
+   VkPipeline DxvkComputePipeline::createPipeline(
+     const DxvkComputePipelineStateInfo& state) const {
++    ProfileScope profile("compute_pipeline_compile");
+     std::vector<VkDescriptorSetLayoutBinding> bindings;
+ 
+     if (Logger::logLevel() <= LogLevel::Debug) {
+@@ -118,10 +123,13 @@ namespace dxvk {
+       t0 = dxvk::high_resolution_clock::now();
+     
+     VkPipeline pipeline = VK_NULL_HANDLE;
+-    if (m_vkd->vkCreateComputePipelines(m_vkd->device(),
+-          m_pipeMgr->m_cache->handle(), 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+-      Logger::err("DxvkComputePipeline: Failed to compile pipeline");
+-      Logger::err(str::format("  cs  : ", m_shaders.cs->debugName()));
++    VkResult status = m_pipeMgr->m_cache->createCompute(&info, &pipeline);
++    if (status != VK_SUCCESS) {
++      static std::atomic<uint32_t> failures { 0 };
++      if (vk::diagnosticBudget(failures, "compute pipeline")) {
++        Logger::err(str::format("DxvkComputePipeline: Failed to compile pipeline, VkResult=", status));
++        Logger::err(str::format("  cs  : ", m_shaders.cs->debugName()));
++      }
+       return VK_NULL_HANDLE;
+     }
+     
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index ad7d7256..a47a056d 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_profile.h"
+ #include <cstring>
+ #include <vector>
+ #include <utility>
+@@ -615,6 +616,7 @@ namespace dxvk {
+           VkDeviceSize          srcOffset,
+           VkDeviceSize          rowAlignment,
+           VkDeviceSize          sliceAlignment) {
++    ProfileScope profile("texture_upload_commands");
+     this->spillRenderPass(true);
+     this->prepareImage(m_execBarriers, dstImage, vk::makeSubresourceRange(dstSubresource));
+ 
+diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
+index efe8354e..0f4f5b82 100644
+--- a/src/dxvk/dxvk_device.cpp
++++ b/src/dxvk/dxvk_device.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_profile.h"
+ #include "dxvk_device.h"
+ #include "dxvk_instance.h"
+ 
+@@ -19,6 +20,7 @@ namespace dxvk {
+     m_perfHints         (getPerfHints()),
+     m_objects           (this),
+     m_submissionQueue   (this) {
++    profileDeviceCreated();
+     auto queueFamilies = m_adapter->findQueueFamilies();
+     m_queues.graphics = getQueue(queueFamilies.graphics, 0);
+     m_queues.transfer = getQueue(queueFamilies.transfer, 0);
+@@ -40,6 +42,7 @@ namespace dxvk {
+     // Stop workers explicitly in order to prevent
+     // access to structures that are being destroyed.
+     m_objects.pipelineManager().stopWorkerThreads();
++    profileDeviceDestroyed();
+   }
+ 
+ 
+@@ -249,6 +252,7 @@ namespace dxvk {
+ 
+ 
+   void DxvkDevice::waitForResource(const Rc<DxvkResource>& resource, DxvkAccess access) {
++    ProfileScope profile("resource_wait");
+     if (resource->isInUse(access)) {
+       auto t0 = dxvk::high_resolution_clock::now();
+ 
+@@ -267,6 +271,7 @@ namespace dxvk {
+   
+   
+   void DxvkDevice::waitForIdle() {
++    ProfileScope profile("device_idle_wait");
+     this->lockSubmission();
+     if (m_vkd->vkDeviceWaitIdle(m_vkd->device()) != VK_SUCCESS)
+       Logger::err("DxvkDevice: waitForIdle: Operation failed");
+diff --git a/src/dxvk/dxvk_device_info.h b/src/dxvk/dxvk_device_info.h
+index 5b740674..39a94746 100644
+--- a/src/dxvk/dxvk_device_info.h
++++ b/src/dxvk/dxvk_device_info.h
+@@ -51,6 +51,7 @@ namespace dxvk {
+     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT         extVertexAttributeDivisor;
+     VkPhysicalDeviceBufferDeviceAddressFeaturesKHR            khrBufferDeviceAddress;
+     VkPhysicalDeviceTimelineSemaphoreFeaturesKHR              khrTimelineSemaphore;
++    VkPhysicalDevicePortabilitySubsetFeaturesKHR               khrPortabilitySubset;
+   };
+ 
+ }
+\ No newline at end of file
+diff --git a/src/dxvk/dxvk_extensions.h b/src/dxvk/dxvk_extensions.h
+index 0e2808d1..74e37dc0 100644
+--- a/src/dxvk/dxvk_extensions.h
++++ b/src/dxvk/dxvk_extensions.h
+@@ -301,6 +301,7 @@ namespace dxvk {
+     DxvkExt khrDriverProperties               = { VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME,                  DxvkExtMode::Optional };
+     DxvkExt khrExternalMemoryWin32            = { VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,              DxvkExtMode::Optional };
+     DxvkExt khrExternalSemaphoreWin32         = { VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,           DxvkExtMode::Optional };
++    DxvkExt khrPortabilitySubset               = { VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME, DxvkExtMode::Optional };
+     DxvkExt khrImageFormatList                = { VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME,                  DxvkExtMode::Required };
+     DxvkExt khrSamplerMirrorClampToEdge       = { VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME,       DxvkExtMode::Optional };
+     DxvkExt khrShaderFloatControls            = { VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME,              DxvkExtMode::Optional };
+@@ -319,6 +320,7 @@ namespace dxvk {
+   struct DxvkInstanceExtensions {
+     DxvkExt extDebugUtils                   = { VK_EXT_DEBUG_UTILS_EXTENSION_NAME,                      DxvkExtMode::Optional };
+     DxvkExt khrGetSurfaceCapabilities2      = { VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME,       DxvkExtMode::Optional };
++    DxvkExt khrPortabilityEnumeration       = { VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME, DxvkExtMode::Optional };
+     DxvkExt khrSurface                      = { VK_KHR_SURFACE_EXTENSION_NAME,                          DxvkExtMode::Required };
+   };
+   
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index 5f0b9ae8..b15502cb 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_profile.h"
+ #include "../util/util_time.h"
+ 
+ #include "dxvk_device.h"
+@@ -5,6 +6,8 @@
+ #include "dxvk_pipemanager.h"
+ #include "dxvk_spec_const.h"
+ #include "dxvk_state_cache.h"
++#include "../vulkan/vulkan_diagnostics.h"
++#include <fstream>
+ 
+ namespace dxvk {
+ 
+@@ -72,7 +75,8 @@ namespace dxvk {
+         return VK_NULL_HANDLE;
+ 
+       // Prevent other threads from adding new instances and check again
+-      //std::lock_guard<dxvk::mutex> lock(m_mutex);
++      std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
++      { ProfileScope timing("graphics_pipeline_foreground_lock_wait"); lock.lock(); }
+       instance = this->findInstance(state, renderPass);
+ 
+       if (!instance) {
+@@ -103,7 +107,8 @@ namespace dxvk {
+ 
+     // Keep the object locked while compiling a pipeline since compiling
+     // similar pipelines concurrently is fragile on some drivers
+-    std::lock_guard<dxvk::mutex> lock(m_mutex);
++    std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
++    { ProfileScope timing("graphics_pipeline_background_lock_wait"); lock.lock(); }
+ 
+     return (this->findInstance(state, renderPass) == nullptr) &&
+            (this->createInstance(state, renderPass) != nullptr);
+@@ -137,6 +142,7 @@ namespace dxvk {
+   VkPipeline DxvkGraphicsPipeline::createPipeline(
+     const DxvkGraphicsPipelineStateInfo& state,
+     const DxvkRenderPass*                renderPass) const {
++    ProfileScope profile("graphics_pipeline_compile");
+     if (Logger::logLevel() <= LogLevel::Debug) {
+       Logger::debug("Compiling graphics pipeline...");
+       this->logPipelineState(LogLevel::Debug, state);
+@@ -433,10 +439,23 @@ namespace dxvk {
+       t0 = dxvk::high_resolution_clock::now();
+     
+     VkPipeline pipeline = VK_NULL_HANDLE;
+-    if (m_vkd->vkCreateGraphicsPipelines(m_vkd->device(),
+-          m_pipeMgr->m_cache->handle(), 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+-      Logger::err("DxvkGraphicsPipeline: Failed to compile pipeline");
+-      this->logPipelineState(LogLevel::Error, state);
++    VkResult status = m_pipeMgr->m_cache->createGraphics(&info, &pipeline);
++    if (status != VK_SUCCESS) {
++      static std::atomic<uint32_t> failures { 0 };
++      if (vk::diagnosticBudget(failures, "graphics pipeline")) {
++        Logger::err(str::format("DxvkGraphicsPipeline: Failed to compile pipeline, VkResult=", status));
++        this->logPipelineState(LogLevel::Error, state);
++        const auto path = env::getEnvVar("DXVK_FAILURE_DUMP_PATH");
++        if (!path.empty()) {
++          for (auto shader : { m_shaders.vs, m_shaders.tcs, m_shaders.tes, m_shaders.gs, m_shaders.fs }) {
++            if (shader != nullptr) {
++              std::ofstream out(str::topath(str::format(path, "/", shader->debugName(), ".spv").c_str()).c_str(), std::ios::binary);
++              if (out) shader->dump(out);
++              else Logger::warn("DXVK diagnostics: cannot write failing shader fixture");
++            }
++          }
++        }
++      }
+       return VK_NULL_HANDLE;
+     }
+     
+diff --git a/src/dxvk/dxvk_image.cpp b/src/dxvk/dxvk_image.cpp
+index 2e4a5f45..8ed0859b 100644
+--- a/src/dxvk/dxvk_image.cpp
++++ b/src/dxvk/dxvk_image.cpp
+@@ -1,6 +1,7 @@
+ #include "dxvk_image.h"
+ 
+ #include "dxvk_device.h"
++#include "../vulkan/vulkan_diagnostics.h"
+ 
+ namespace dxvk {
+   
+@@ -56,10 +57,10 @@ namespace dxvk {
+       formatList.pNext = &externalInfo;
+     }
+     
+-    if (m_vkd->vkCreateImage(m_vkd->device(),
+-          &info, nullptr, &m_image.image) != VK_SUCCESS) {
+-      throw DxvkError(str::format(
+-        "DxvkImage: Failed to create image:",
++    VkResult createStatus = m_vkd->vkCreateImage(m_vkd->device(), &info, nullptr, &m_image.image);
++    if (createStatus != VK_SUCCESS) {
++      auto message = str::format(
++        "DxvkImage: Failed to create image, VkResult=", createStatus,
+         "\n  Type:            ", info.imageType,
+         "\n  Format:          ", info.format,
+         "\n  Extent:          ", "(", info.extent.width,
+@@ -69,7 +70,11 @@ namespace dxvk {
+         "\n  Array layers:    ", info.arrayLayers,
+         "\n  Samples:         ", info.samples,
+         "\n  Usage:           ", info.usage,
+-        "\n  Tiling:          ", info.tiling));
++        "\n  Tiling:          ", info.tiling);
++      static std::atomic<uint32_t> failures { 0 };
++      if (vk::diagnosticBudget(failures, "image creation"))
++        Logger::err(message);
++      throw DxvkError(str::format("DxvkImage: creation failed, VkResult=", createStatus));
+     }
+     
+     // Get memory requirements for the image. We may enforce strict
+@@ -145,14 +150,24 @@ namespace dxvk {
+       dedicatedRequirements.requiresDedicatedAllocation = VK_TRUE;
+     }
+ 
+-    // Ask driver whether we should be using a dedicated allocation
+-    m_image.memory = memAlloc.alloc(&memReq.memoryRequirements,
+-      dedicatedRequirements, dedMemoryAllocInfo, memFlags, hints);
+-    
+-    // Try to bind the allocated memory slice to the image
+-    if (m_vkd->vkBindImageMemory(m_vkd->device(), m_image.image,
+-          m_image.memory.memory(), m_image.memory.offset()) != VK_SUCCESS)
+-      throw DxvkError("DxvkImage::DxvkImage: Failed to bind device memory");
++    // Destroy the VkImage if allocation/binding throws during construction.
++    try {
++      m_image.memory = memAlloc.alloc(&memReq.memoryRequirements,
++        dedicatedRequirements, dedMemoryAllocInfo, memFlags, hints);
++      VkResult bindStatus = m_vkd->vkBindImageMemory(m_vkd->device(), m_image.image,
++        m_image.memory.memory(), m_image.memory.offset());
++      if (bindStatus != VK_SUCCESS)
++        throw DxvkError(str::format("DxvkImage: bind VkResult=", bindStatus));
++    } catch (const DxvkError& e) {
++      static std::atomic<uint32_t> failures { 0 };
++      if (vk::diagnosticBudget(failures, "image allocation"))
++        Logger::err(str::format("DxvkImage: format=", info.format,
++          " extent=", info.extent.width, "x", info.extent.height, "x", info.extent.depth,
++          " bytes=", memReq.memoryRequirements.size,
++          " memoryTypeBits=", memReq.memoryRequirements.memoryTypeBits, " ", e.message()));
++      m_vkd->vkDestroyImage(m_vkd->device(), m_image.image, nullptr);
++      throw;
++    }
+   }
+   
+   
+@@ -342,10 +357,10 @@ namespace dxvk {
+         VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+     }
+     
+-    if (m_vkd->vkCreateImageView(m_vkd->device(),
+-          &viewInfo, nullptr, &m_views[type]) != VK_SUCCESS) {
+-      throw DxvkError(str::format(
+-        "DxvkImageView: Failed to create image view:"
++    VkResult viewStatus = m_vkd->vkCreateImageView(m_vkd->device(), &viewInfo, nullptr, &m_views[type]);
++    if (viewStatus != VK_SUCCESS) {
++      auto message = str::format(
++        "DxvkImageView: Failed to create image view, VkResult=", viewStatus,
+         "\n  View type:       ", viewInfo.viewType,
+         "\n  View format:     ", viewInfo.format,
+         "\n  Usage:           ", std::hex, viewUsage.usage,
+@@ -365,7 +380,11 @@ namespace dxvk {
+         "\n    Array layers:  ", m_image->info().numLayers,
+         "\n    Samples:       ", m_image->info().sampleCount,
+         "\n    Usage:         ", std::hex, m_image->info().usage, std::dec,
+-        "\n    Tiling:        ", m_image->info().tiling));
++        "\n    Tiling:        ", m_image->info().tiling);
++      static std::atomic<uint32_t> failures { 0 };
++      if (vk::diagnosticBudget(failures, "image view creation"))
++        Logger::err(message);
++      throw DxvkError(str::format("DxvkImageView: creation failed, VkResult=", viewStatus));
+     }
+   }
+   
+diff --git a/src/dxvk/dxvk_instance.cpp b/src/dxvk/dxvk_instance.cpp
+index 2f9d8f20..32ddcc23 100644
+--- a/src/dxvk/dxvk_instance.cpp
++++ b/src/dxvk/dxvk_instance.cpp
+@@ -6,6 +6,7 @@
+ #include "dxvk_platform_exts.h"
+ 
+ #include <algorithm>
++#include "../vulkan/vulkan_diagnostics.h"
+ 
+ namespace dxvk {
+   
+@@ -92,12 +93,13 @@ namespace dxvk {
+     std::vector<DxvkExt*> insExtensionList = {{
+       &insExtensions.khrGetSurfaceCapabilities2,
+       &insExtensions.khrSurface,
++      &insExtensions.khrPortabilityEnumeration,
+     }};
+ 
+     // Hide VK_EXT_debug_utils behind an environment variable. This extension
+     // adds additional overhead to winevulkan
+     if ((env::getEnvVar("DXVK_PERF_EVENTS") == "1") || 
+-      (m_options.enableDebugUtils)) {
++      (m_options.enableDebugUtils) || vk::diagnosticsEnabled()) {
+         insExtensionList.push_back(&insExtensions.extDebugUtils);
+         Logger::warn("DXVK: Debug Utils are enabled, perf events are ON. May affect performance!");
+     }
+@@ -136,18 +138,23 @@ namespace dxvk {
+     VkInstanceCreateInfo info;
+     info.sType                    = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+     info.pNext                    = nullptr;
+-    info.flags                    = 0;
++    info.flags                    = insExtensions.khrPortabilityEnumeration
++      ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0;
+     info.pApplicationInfo         = &appInfo;
+     info.enabledLayerCount        = 0;
+     info.ppEnabledLayerNames      = nullptr;
+     info.enabledExtensionCount    = extensionNameList.count();
+     info.ppEnabledExtensionNames  = extensionNameList.names();
+     
++    auto debugInfo = vk::diagnosticMessengerInfo();
++    if (insExtensions.extDebugUtils && vk::diagnosticsEnabled())
++      info.pNext = &debugInfo;
++
+     VkInstance result = VK_NULL_HANDLE;
+     VkResult status = m_vkl->vkCreateInstance(&info, nullptr, &result);
+ 
+     if (status != VK_SUCCESS)
+-      throw DxvkError("DxvkInstance::createInstance: Failed to create Vulkan 1.1 instance");
++      throw DxvkError(str::format("DxvkInstance::createInstance: Failed to create Vulkan 1.1 instance, VkResult=", status));
+     
+     return result;
+   }
+diff --git a/src/dxvk/dxvk_memory.cpp b/src/dxvk/dxvk_memory.cpp
+index 2fe01c1d..2564c161 100644
+--- a/src/dxvk/dxvk_memory.cpp
++++ b/src/dxvk/dxvk_memory.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "dxvk_device.h"
+ #include "dxvk_memory.h"
++#include "../vulkan/vulkan_diagnostics.h"
+ 
+ namespace dxvk {
+   
+@@ -424,8 +425,14 @@ namespace dxvk {
+     info.allocationSize   = size;
+     info.memoryTypeIndex  = type->memTypeId;
+ 
+-    if (m_vkd->vkAllocateMemory(m_vkd->device(), &info, nullptr, &result.memHandle) != VK_SUCCESS)
++    VkResult status = m_vkd->vkAllocateMemory(m_vkd->device(), &info, nullptr, &result.memHandle);
++    if (status != VK_SUCCESS) {
++      static std::atomic<uint32_t> failures { 0 };
++      if (vk::diagnosticBudget(failures, "memory allocation"))
++        Logger::err(str::format("DxvkMemoryAllocator: VkResult=", status,
++          " bytes=", size, " memoryType=", type->memTypeId, " flags=", flags));
+       return DxvkDeviceMemory();
++    }
+     
+     if (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+       VkResult status = m_vkd->vkMapMemory(m_vkd->device(), result.memHandle, 0, VK_WHOLE_SIZE, 0, &result.memPointer);
+diff --git a/src/dxvk/dxvk_pipecache.cpp b/src/dxvk/dxvk_pipecache.cpp
+index 3085e8b8..a5002f2a 100644
+--- a/src/dxvk/dxvk_pipecache.cpp
++++ b/src/dxvk/dxvk_pipecache.cpp
+@@ -1,5 +1,168 @@
+ #include "dxvk_pipecache.h"
++#include "../util/util_env.h"
++#include "../util/util_profile.h"
++#include "../util/log/log.h"
++#include "../util/util_cache_file.h"
++#include "../util/util_shader_revision.h"
++#include <cstring>
+ 
+ namespace dxvk {
+-  
++  DxvkPipelineCache::DxvkPipelineCache(const Rc<vk::DeviceFn>& vkd,
++    const VkPhysicalDeviceProperties& props) : m_vkd(vkd) {
++    try {
++    const auto dirOverride = env::getEnvVar("DXVK_W101_CACHE_PATH");
++    if (env::getExeName() != "WizardGraphicalClient.exe" && dirOverride.empty()) return;
++    if (env::getEnvVar("DXVK_W101_CACHE") == "0") {
++      Logger::info("W101 pipeline cache disabled"); return;
++    }
++    const Sha1Data parts[] = {
++      { &props.vendorID, sizeof(props.vendorID) }, { &props.deviceID, sizeof(props.deviceID) },
++      { &props.driverVersion, sizeof(props.driverVersion) },
++      { props.pipelineCacheUUID, VK_UUID_SIZE },
++      { W101_SHADER_REVISION, sizeof(W101_SHADER_REVISION) }
++    };
++    m_key = Sha1Hash::compute(5, parts);
++    std::string dir = dirOverride.empty() ? "C:\\graphics-patch-cache\\Wizard101" : dirOverride;
++    if (dirOverride.empty()) env::createDirectory("C:\\graphics-patch-cache");
++    env::createDirectory(dir);
++    m_path = dir + "/" + m_key.toString() + ".vkcache";
++    std::vector<char> data;
++    const bool loaded = cachefile::read(m_path, m_key, data);
++    if (loaded) {
++      // Never send a malformed or incompatible Vulkan header to the driver.
++      VkPipelineCacheHeaderVersionOne header = {};
++      if (data.size() >= sizeof(header)) std::memcpy(&header, data.data(), sizeof(header));
++      if (header.headerSize < sizeof(header) || header.headerSize > data.size()
++       || header.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE
++       || header.vendorID != props.vendorID || header.deviceID != props.deviceID
++       || std::memcmp(header.pipelineCacheUUID, props.pipelineCacheUUID, VK_UUID_SIZE)) data.clear();
++    }
++    VkPipelineCacheCreateInfo info = {};
++    info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
++    info.initialDataSize = data.size(); info.pInitialData = data.empty() ? nullptr : data.data();
++    VkResult status = m_vkd->vkCreatePipelineCache(m_vkd->device(), &info, nullptr, &m_cache);
++    if (status != VK_SUCCESS && !data.empty()) {
++      m_cache = VK_NULL_HANDLE;
++      info.initialDataSize = 0; info.pInitialData = nullptr;
++      status = m_vkd->vkCreatePipelineCache(m_vkd->device(), &info, nullptr, &m_cache);
++      data.clear();
++    }
++    if (status != VK_SUCCESS) {
++      m_cache = VK_NULL_HANDLE;
++      Logger::warn(str::format("W101 pipeline cache unavailable: ", status)); return;
++    }
++    Logger::info(str::format("W101 pipeline cache ", data.empty() ? "empty: " : "loaded: ", m_path));
++    try { m_writer = dxvk::thread([this] { writer(); }); }
++    catch (const std::exception& e) { Logger::warn(str::format("W101 cache writer unavailable: ", e.what())); }
++    } catch (const std::exception& e) {
++      Logger::warn(str::format("W101 cache initialization failed; rendering continues: ", e.what()));
++    }
++  }
++
++  DxvkPipelineCache::~DxvkPipelineCache() {
++    stop();
++    if (m_cache) m_vkd->vkDestroyPipelineCache(m_vkd->device(), m_cache, nullptr);
++  }
++
++  void DxvkPipelineCache::changed() {
++    if (!m_cache || m_bypass.load()) return;
++    std::lock_guard<dxvk::mutex> lock(m_lock);
++    ++m_generation; m_last = std::chrono::steady_clock::now();
++    m_cond.notify_one();
++  }
++
++  VkResult DxvkPipelineCache::createGraphics(const VkGraphicsPipelineCreateInfo* info, VkPipeline* pipeline) {
++    ProfileScope timing("graphics_pipeline_driver_compile");
++    std::shared_lock<std::shared_mutex> lock(m_gate, std::try_to_lock);
++    // A snapshot must never stall a required draw. The uncached pipeline
++    // still enters the normal instance table and retains draw ordering.
++    const auto cache = lock.owns_lock() && !m_bypass.load() ? m_cache : VK_NULL_HANDLE;
++    VkResult status = m_vkd->vkCreateGraphicsPipelines(m_vkd->device(), cache, 1, info, nullptr, pipeline);
++    if (status != VK_SUCCESS && cache) {
++      if (!m_bypass.exchange(true)) Logger::warn("W101 cached pipeline failed; retrying without cache");
++      if (*pipeline) m_vkd->vkDestroyPipeline(m_vkd->device(), *pipeline, nullptr);
++      *pipeline = VK_NULL_HANDLE;
++      status = m_vkd->vkCreateGraphicsPipelines(m_vkd->device(), VK_NULL_HANDLE, 1, info, nullptr, pipeline);
++    }
++    if (cache && status == VK_SUCCESS) changed();
++    return status;
++  }
++
++  VkResult DxvkPipelineCache::createCompute(const VkComputePipelineCreateInfo* info, VkPipeline* pipeline) {
++    ProfileScope timing("compute_pipeline_driver_compile");
++    std::shared_lock<std::shared_mutex> lock(m_gate, std::try_to_lock);
++    // A snapshot must never stall a required draw. The uncached pipeline
++    // still enters the normal instance table and retains draw ordering.
++    const auto cache = lock.owns_lock() && !m_bypass.load() ? m_cache : VK_NULL_HANDLE;
++    VkResult status = m_vkd->vkCreateComputePipelines(m_vkd->device(), cache, 1, info, nullptr, pipeline);
++    if (status != VK_SUCCESS && cache) {
++      if (!m_bypass.exchange(true)) Logger::warn("W101 cached pipeline failed; retrying without cache");
++      if (*pipeline) m_vkd->vkDestroyPipeline(m_vkd->device(), *pipeline, nullptr);
++      *pipeline = VK_NULL_HANDLE;
++      status = m_vkd->vkCreateComputePipelines(m_vkd->device(), VK_NULL_HANDLE, 1, info, nullptr, pipeline);
++    }
++    if (cache && status == VK_SUCCESS) changed();
++    return status;
++  }
++
++  void DxvkPipelineCache::save(bool final) {
++    uint64_t generation;
++    { std::lock_guard<dxvk::mutex> lock(m_lock);
++      generation = m_generation;
++      if (generation == m_saved) return;
++    }
++    std::vector<char> data;
++    { std::unique_lock<std::shared_mutex> gate(m_gate, std::defer_lock);
++      if (final) gate.lock(); else if (!gate.try_lock()) return;
++      ProfileScope timing("pipeline_cache_snapshot");
++      size_t size = 0;
++      if (m_vkd->vkGetPipelineCacheData(m_vkd->device(), m_cache, &size, nullptr) != VK_SUCCESS
++       || size < sizeof(VkPipelineCacheHeaderVersionOne) || size > cachefile::MaxPayload) return;
++      data.resize(size);
++      if (m_vkd->vkGetPipelineCacheData(m_vkd->device(), m_cache, &size, data.data()) != VK_SUCCESS) return;
++      data.resize(size);
++    }
++    // The gate is released before hashing, disk writes and atomic replacement.
++    bool written;
++    { ProfileScope timing("pipeline_cache_file_write");
++      written = cachefile::write(m_path, m_key, data);
++    }
++    if (written) {
++      std::lock_guard<dxvk::mutex> lock(m_lock); m_saved = generation;
++      Logger::info(str::format("W101 pipeline cache saved: ", data.size(), " bytes"));
++    } else {
++      // Persistence failure never affects rendering; stop retrying this launch.
++      m_path.clear(); Logger::warn("W101 pipeline cache persistence unavailable");
++    }
++  }
++
++  void DxvkPipelineCache::writer() {
++    env::setThreadName("w101-pipeline-cache");
++    ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
++    try {
++      for (;;) {
++        std::unique_lock<dxvk::mutex> lock(m_lock);
++        // Stay asleep while clean or after a permanent storage failure.
++        m_cond.wait(lock, [this] { return m_stop || (!m_path.empty() && m_generation != m_saved); });
++        if (m_stop) break;
++        const auto last = m_last;
++        const auto deadline = last + std::chrono::seconds(5);
++        if (m_cond.wait_until(lock, deadline, [this, last] { return m_stop || m_last != last; }))
++          continue;
++        lock.unlock();
++        save(false);
++        lock.lock();
++        // A held gate, VK_INCOMPLETE or transient driver failure leaves it
++        // dirty. Bound retries without polling the clean state or spinning.
++        if (!m_stop && !m_path.empty() && m_generation != m_saved)
++          m_cond.wait_for(lock, std::chrono::seconds(1), [this, last] { return m_stop || m_last != last; });
++      }
++      if (!m_path.empty()) save(true);
++    } catch (const std::exception& e) { Logger::warn(str::format("W101 cache save failed: ", e.what())); }
++  }
++
++  void DxvkPipelineCache::stop() {
++    { std::lock_guard<dxvk::mutex> lock(m_lock); m_stop = true; m_cond.notify_all(); }
++    if (m_writer.joinable()) m_writer.join();
++  }
+ }
+diff --git a/src/dxvk/dxvk_pipecache.h b/src/dxvk/dxvk_pipecache.h
+index 03619e53..bd42ae40 100644
+--- a/src/dxvk/dxvk_pipecache.h
++++ b/src/dxvk/dxvk_pipecache.h
+@@ -1,37 +1,37 @@
+ #pragma once
+-
+ #include <atomic>
+-#include <condition_variable>
+-#include <fstream>
+-
++#include <shared_mutex>
++#include <vector>
+ #include "dxvk_include.h"
+-
++#include "../util/thread.h"
+ #include "../util/sha1/sha1_util.h"
+-#include "../util/util_env.h"
+-#include "../util/util_time.h"
+ 
+ namespace dxvk {
+-  
+-  /**
+-   * \brief Pipeline cache
+-   * 
+-   * Allows the Vulkan implementation to
+-   * re-use previously compiled pipelines.
+-   */
++  // The driver synchronizes concurrent vkCreate*Pipelines calls (flags=0).
++  // Snapshot contention uses uncached compilation rather than waiting.
+   class DxvkPipelineCache : public RcObject {
+-    
++    friend struct PipelineSnapshotProbe;
+   public:
+-    
+-    DxvkPipelineCache(const Rc<vk::DeviceFn>& vkd) { }
+-    
+-    /**
+-     * \brief Pipeline cache handle
+-     * \returns Pipeline cache handle
+-     */
+-    VkPipelineCache handle() const {
+-      return VK_NULL_HANDLE;
+-    }
+-    
++    DxvkPipelineCache(const Rc<vk::DeviceFn>& vkd, const VkPhysicalDeviceProperties& props);
++    ~DxvkPipelineCache();
++    VkResult createGraphics(const VkGraphicsPipelineCreateInfo* info, VkPipeline* pipeline);
++    VkResult createCompute(const VkComputePipelineCreateInfo* info, VkPipeline* pipeline);
++    void stop();
++  private:
++    Rc<vk::DeviceFn> m_vkd;
++    VkPipelineCache m_cache = VK_NULL_HANDLE;
++    std::atomic<bool> m_bypass { false };
++    Sha1Hash m_key;
++    std::string m_path;
++    std::shared_mutex m_gate;
++    dxvk::mutex m_lock;
++    dxvk::condition_variable m_cond;
++    dxvk::thread m_writer;
++    bool m_stop = false;
++    uint64_t m_generation = 0, m_saved = 0;
++    std::chrono::steady_clock::time_point m_last;
++    void changed();
++    void writer();
++    void save(bool final);
+   };
+-  
+ }
+diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
+index 950efc28..0a5cf0e1 100644
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -8,11 +8,11 @@ namespace dxvk {
+           DxvkDevice*         device,
+           DxvkRenderPassPool* passManager)
+   : m_device    (device),
+-    m_cache     (new DxvkPipelineCache(device->vkd())) {
++    m_cache     (new DxvkPipelineCache(device->vkd(), device->adapter()->deviceProperties())) {
+     std::string useAsync      = env::getEnvVar("DXVK_ASYNC");
+     std::string useStateCache = env::getEnvVar("DXVK_STATE_CACHE");
+ 
+-    if (useAsync == "1" || device->config().enableAsync)
++    if (env::getExeName() != "WizardGraphicalClient.exe" && (useAsync == "1" || device->config().enableAsync))
+       m_compiler = new DxvkPipelineCompiler(device);
+     
+     if (useStateCache != "0" && device->config().enableStateCache)
+@@ -87,6 +87,7 @@ namespace dxvk {
+   void DxvkPipelineManager::stopWorkerThreads() const {
+     if (m_stateCache != nullptr)
+       m_stateCache->stopWorkerThreads();
++    m_cache->stop();
+   }
+   
+ }
+diff --git a/src/dxvk/dxvk_pipemanager.h b/src/dxvk/dxvk_pipemanager.h
+index dad7a13b..3497fdb5 100644
+--- a/src/dxvk/dxvk_pipemanager.h
++++ b/src/dxvk/dxvk_pipemanager.h
+@@ -36,6 +36,7 @@ namespace dxvk {
+   class DxvkPipelineManager {
+     friend class DxvkComputePipeline;
+     friend class DxvkGraphicsPipeline;
++    friend struct PipelineSnapshotProbe;
+   public:
+     
+     DxvkPipelineManager(
+diff --git a/src/dxvk/dxvk_queue.cpp b/src/dxvk/dxvk_queue.cpp
+index 86f0b4e3..47245e24 100644
+--- a/src/dxvk/dxvk_queue.cpp
++++ b/src/dxvk/dxvk_queue.cpp
+@@ -1,3 +1,4 @@
++#include "../util/util_profile.h"
+ #include "dxvk_device.h"
+ #include "dxvk_queue.h"
+ 
+@@ -25,6 +26,7 @@ namespace dxvk {
+   
+   
+   void DxvkSubmissionQueue::submit(DxvkSubmitInfo submitInfo) {
++    ProfileScope profile("submission_queue_throttle");
+     std::unique_lock<dxvk::mutex> lock(m_mutex);
+ 
+     m_finishCond.wait(lock, [this] {
+@@ -54,6 +56,7 @@ namespace dxvk {
+ 
+   void DxvkSubmissionQueue::synchronizeSubmission(
+           DxvkSubmitStatus*   status) {
++    ProfileScope profile("submission_wait");
+     std::unique_lock<dxvk::mutex> lock(m_mutex);
+ 
+     m_submitCond.wait(lock, [status] {
+@@ -63,6 +66,7 @@ namespace dxvk {
+ 
+ 
+   void DxvkSubmissionQueue::synchronize() {
++    ProfileScope profile("submission_drain_wait");
+     std::unique_lock<dxvk::mutex> lock(m_mutex);
+ 
+     m_submitCond.wait(lock, [this] {
+diff --git a/src/dxvk/dxvk_state_cache.cpp b/src/dxvk/dxvk_state_cache.cpp
+index 8a4df379..2d0ec2cc 100644
+--- a/src/dxvk/dxvk_state_cache.cpp
++++ b/src/dxvk/dxvk_state_cache.cpp
+@@ -950,7 +950,7 @@ namespace dxvk {
+ 
+     std::ofstream file;
+ 
+-    while (!m_stopThreads.load()) {
++    while (true) {
+       DxvkStateCacheEntry entry;
+ 
+       { std::unique_lock<dxvk::mutex> lock(m_writerLock);
+diff --git a/src/util/config/config.cpp b/src/util/config/config.cpp
+index 74c5a970..e7ca1782 100644
+--- a/src/util/config/config.cpp
++++ b/src/util/config/config.cpp
+@@ -14,6 +14,10 @@
+ namespace dxvk {
+ 
+   const static std::vector<std::pair<const char*, Config>> g_appDefaults = {{
++    /* Wizard101: pace ordinary shortcut launches; user config wins. */
++    { R"((^|[\\/])WizardGraphicalClient\.exe$)", {{
++      { "d3d9.maxFrameRate", "60" },
++    }} },
+     /* Assassin's Creed Syndicate: amdags issues  */
+     { R"(\\ACS\.exe$)", {{
+       { "dxgi.customVendorId",              "10de" },
+diff --git a/src/util/meson.build b/src/util/meson.build
+index 34da01ee..9ac562bf 100644
+--- a/src/util/meson.build
++++ b/src/util/meson.build
+@@ -1,5 +1,6 @@
+ util_src = files([
+   'util_env.cpp',
++  'util_profile.cpp',
+   'util_string.cpp',
+   'util_fps_limiter.cpp',
+   'util_gdi.cpp',
+diff --git a/src/util/util_cache_file.h b/src/util/util_cache_file.h
+new file mode 100644
+index 00000000..d794aa00
+--- /dev/null
++++ b/src/util/util_cache_file.h
+@@ -0,0 +1,69 @@
++#pragma once
++#include <fstream>
++#include <vector>
++#include <cstdio>
++#include <cstdint>
++#include "sha1/sha1_util.h"
++#ifdef _WIN32
++#include <windows.h>
++#else
++#include <unistd.h>
++#endif
++
++namespace dxvk::cachefile {
++  // Envelope has no pointers; x64 little-endian version 1. SHA1 detects damage,
++  // not authenticity. Ignore abandoned .tmp files on reload.
++  struct Header {
++    uint32_t magic = 0x31435057, version = 1;
++    uint64_t size = 0;
++    Sha1Hash key, checksum;
++  };
++  constexpr size_t MaxFile = 64u * 1024u * 1024u;
++  constexpr size_t MaxPayload = MaxFile - sizeof(Header);
++
++  inline bool read(const std::string& path, const Sha1Hash& key, std::vector<char>& data) {
++    data.clear();
++    std::ifstream file(path, std::ios::binary | std::ios::ate);
++    if (!file) return false;
++    const auto length = file.tellg();
++    if (length < std::streamoff(sizeof(Header)) || length > std::streamoff(MaxFile)) return false;
++    Header header;
++    file.seekg(0); file.read(reinterpret_cast<char*>(&header), sizeof(header));
++    if (!file || header.magic != 0x31435057 || header.version != 1 || header.key != key
++     || header.size != uint64_t(length) - sizeof(header)) return false;
++    data.resize(header.size);
++    file.read(data.data(), data.size());
++    if (!file || Sha1Hash::compute(data.data(), data.size()) != header.checksum) {
++      data.clear(); return false;
++    }
++    return true;
++  }
++
++  inline bool write(const std::string& path, const Sha1Hash& key, const std::vector<char>& data) {
++    if (data.size() > MaxPayload) return false;
++    Header header;
++    header.size = data.size(); header.key = key;
++    header.checksum = Sha1Hash::compute(data.data(), data.size());
++#ifdef _WIN32
++    const auto temp = path + "." + std::to_string(GetCurrentProcessId()) + "." + std::to_string(GetCurrentThreadId()) + ".tmp";
++    HANDLE file = CreateFileA(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
++    if (file == INVALID_HANDLE_VALUE) return false;
++    DWORD written;
++    bool ok = WriteFile(file, &header, sizeof(header), &written, nullptr) && written == sizeof(header);
++    if (ok) ok = WriteFile(file, data.data(), DWORD(data.size()), &written, nullptr) && written == data.size();
++    if (ok) ok = FlushFileBuffers(file);
++    CloseHandle(file);
++    if (ok) ok = MoveFileExA(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
++    if (!ok) DeleteFileA(temp.c_str());
++    return ok;
++#else
++    const auto temp = path + "." + std::to_string(getpid()) + ".tmp";
++    { std::ofstream file(temp, std::ios::binary | std::ios::trunc);
++      file.write(reinterpret_cast<const char*>(&header), sizeof(header));
++      file.write(data.data(), data.size()); file.flush();
++      if (!file) { std::remove(temp.c_str()); return false; }
++    }
++    return std::rename(temp.c_str(), path.c_str()) == 0;
++#endif
++  }
++}
+diff --git a/src/util/util_fps_limiter.cpp b/src/util/util_fps_limiter.cpp
+index da980002..d8922a4d 100644
+--- a/src/util/util_fps_limiter.cpp
++++ b/src/util/util_fps_limiter.cpp
+@@ -1,4 +1,6 @@
+ #include <thread>
++#include <atomic>
++#include "util_profile.h"
+ 
+ #include "thread.h"
+ #include "util_env.h"
+@@ -39,6 +41,12 @@ namespace dxvk {
+       if (isEnabled() && !m_initialized)
+         initialize();
+     }
++    static std::atomic<bool> logged {false};
++    if (env::getExeName() == "WizardGraphicalClient.exe" && !logged.exchange(true)) {
++      Logger::info(str::format("W101 effective frame cap: ", isEnabled()
++        ? str::format(double(NtTimerDuration::period::den) / m_targetInterval.count(), " FPS")
++        : "uncapped"));
++    }
+   }
+ 
+ 
+@@ -61,7 +69,9 @@ namespace dxvk {
+       // Don't call sleep if the amount of time to sleep is shorter
+       // than the time the function calls are likely going to take
+       NtTimerDuration sleepDuration = m_targetInterval - m_deviation - frameTime;
+-      t1 = sleep(t1, sleepDuration);
++      { ProfileScope profile("frame_limiter_delay");
++        t1 = sleep(t1, sleepDuration);
++      }
+ 
+       // Compensate for any sleep inaccuracies in the next frame, and
+       // limit cumulative deviation in order to avoid stutter in case we
+@@ -79,6 +89,29 @@ namespace dxvk {
+     if (duration <= NtTimerDuration::zero())
+       return t0;
+ 
++    if (m_lowCpuLimiter) {
++      // Wine can sleep close to the deadline. Keep at most 200 us of
++      // busy waiting, independent of timer granularity and frame rate.
++      const auto deadline = t0 + duration;
++      const auto spinTail = std::chrono::microseconds(200);
++      TimePoint t1 = t0;
++      { ProfileScope timing("frame_limiter_sleep");
++        while (deadline - t1 > spinTail) {
++          const auto sleepDuration = std::chrono::duration_cast<NtTimerDuration>(deadline - t1 - spinTail);
++          LARGE_INTEGER ticks;
++          ticks.QuadPart = -sleepDuration.count();
++          if (!NtDelayExecution || NtDelayExecution(FALSE, &ticks) != 0)
++            std::this_thread::sleep_for(sleepDuration);
++          t1 = dxvk::high_resolution_clock::now();
++        }
++      }
++      { ProfileScope timing("frame_limiter_spin");
++        while (t1 < deadline)
++          t1 = dxvk::high_resolution_clock::now();
++      }
++      return t1;
++    }
++
+     // On wine, we can rely on NtDelayExecution waiting for more or
+     // less exactly the desired amount of time, and we want to avoid
+     // spamming QueryPerformanceCounter for performance reasons.
+@@ -92,6 +125,7 @@ namespace dxvk {
+     NtTimerDuration remaining = duration;
+     TimePoint t1 = t0;
+ 
++    { ProfileScope timing("frame_limiter_sleep");
+     while (remaining > sleepThreshold) {
+       NtTimerDuration sleepDuration = remaining - sleepThreshold;
+ 
+@@ -108,13 +142,16 @@ namespace dxvk {
+       remaining -= std::chrono::duration_cast<NtTimerDuration>(t1 - t0);
+       t0 = t1;
+     }
++    }
+ 
+     // Busy-wait until we have slept long enough
++    { ProfileScope timing("frame_limiter_spin");
+     while (remaining > NtTimerDuration::zero()) {
+       t1 = dxvk::high_resolution_clock::now();
+       remaining -= std::chrono::duration_cast<NtTimerDuration>(t1 - t0);
+       t0 = t1;
+     }
++    }
+ 
+     return t1;
+   }
+@@ -123,6 +160,14 @@ namespace dxvk {
+   void FpsLimiter::initialize() {
+     HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
+ 
++    // Preserve inherited pacing for other executables and native Windows.
++    // The candidate remains opt-in until the paired limiter probe passes.
++    m_lowCpuLimiter = ntdll && ::GetProcAddress(ntdll, "wine_get_version")
++      && env::getExeName() == "WizardGraphicalClient.exe"
++      && env::getEnvVar("DXVK_W101_LIMITER") == "sleep";
++    if (env::getExeName() == "WizardGraphicalClient.exe")
++      Logger::info(m_lowCpuLimiter ? "W101 limiter mode: sleep (200 us spin tail)" : "W101 limiter mode: legacy");
++
+     if (ntdll) {
+       NtDelayExecution = reinterpret_cast<NtDelayExecutionProc>(
+         ::GetProcAddress(ntdll, "NtDelayExecution"));
+diff --git a/src/util/util_fps_limiter.h b/src/util/util_fps_limiter.h
+index 3fca509c..2932046c 100644
+--- a/src/util/util_fps_limiter.h
++++ b/src/util/util_fps_limiter.h
+@@ -63,6 +63,7 @@ namespace dxvk {
+ 
+     bool            m_initialized     = false;
+     bool            m_envOverride     = false;
++    bool            m_lowCpuLimiter   = false;
+ 
+     NtTimerDuration m_sleepGranularity = NtTimerDuration::zero();
+     NtTimerDuration m_sleepThreshold   = NtTimerDuration::zero();
+diff --git a/src/util/util_profile.cpp b/src/util/util_profile.cpp
+new file mode 100644
+index 00000000..66ceeb0d
+--- /dev/null
++++ b/src/util/util_profile.cpp
+@@ -0,0 +1,96 @@
++#include "util_profile.h"
++#include "util_env.h"
++#include "thread.h"
++#include <atomic>
++#include <fstream>
++#include <vector>
++
++namespace dxvk {
++  std::atomic<int32_t> profileState { -1 };
++  namespace {
++    using Clock = std::chrono::steady_clock;
++    struct Event { const char* name; uint32_t tid; int64_t start, duration; };
++    class Recorder {
++    public:
++      Clock::time_point origin;
++      Recorder() {
++        const auto path = env::getEnvVar("DXVK_W101_PROFILE");
++        if (path.empty()) { profileState.store(0); return; }
++        file.open(path, std::ios::trunc | std::ios::binary);
++        if (!file) { profileState.store(0); return; }
++        file << "event,thread,start_us,duration_us\n";
++        origin = Clock::now();
++        pending.reserve(8192);
++        profileState.store(1);
++        try { worker = dxvk::thread([this] {
++          try { write(); } catch (...) { profileState.store(0); }
++        }); }
++        catch (...) { profileState.store(0); file.close(); }
++      }
++      void shutdown() {
++        profileState.store(0);
++        { std::lock_guard<dxvk::mutex> guard(lock); stop = true; cond.notify_all(); }
++        if (worker.joinable()) worker.join();
++      }
++      void event(const char* name, Clock::time_point begin, Clock::time_point end) {
++        if (profileState.load(std::memory_order_relaxed) != 1) return;
++        if (end - origin >= std::chrono::seconds(180)) {
++          profileState.store(0); cond.notify_all(); return;
++        }
++        // Producers never wait for disk or a contended profiling lock.
++        std::unique_lock<dxvk::mutex> guard(lock, std::try_to_lock);
++        if (!guard.owns_lock() || pending.size() >= 8192) { ++dropped; return; }
++        pending.push_back({ name, this_thread::get_id(),
++          std::chrono::duration_cast<std::chrono::microseconds>(begin - origin).count(),
++          std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count() });
++      }
++    private:
++      std::ofstream file;
++      dxvk::mutex lock;
++      dxvk::condition_variable cond;
++      dxvk::thread worker;
++      std::vector<Event> pending;
++      std::atomic<uint64_t> dropped { 0 };
++      bool stop = false;
++      void write() {
++        env::setThreadName("w101-timing-writer");
++        ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
++        std::vector<Event> batch; batch.reserve(8192);
++        size_t bytes = 34;
++        for (;;) {
++          std::unique_lock<dxvk::mutex> guard(lock);
++          cond.wait_until(guard, std::min(origin + std::chrono::seconds(180),
++            Clock::now() + std::chrono::milliseconds(250)), [this] { return stop || profileState.load() != 1; });
++          bool done = stop || profileState.load() != 1 || Clock::now() - origin >= std::chrono::seconds(180);
++          if (done) profileState.store(0);
++          pending.swap(batch);
++          guard.unlock();
++          for (const auto& event : batch) {
++            const auto row = std::string(event.name) + "," + std::to_string(event.tid) + ","
++              + std::to_string(event.start) + "," + std::to_string(event.duration) + "\n";
++            if (bytes + row.size() + 128 > 64u * 1024u * 1024u) { profileState.store(0); done = true; break; }
++            file << row; bytes += row.size();
++          }
++          batch.clear(); file.flush();
++          if (!file) { profileState.store(0); return; }
++          if (done) { file << "# dropped_events=" << dropped.load() << "\n"; file.flush(); return; }
++        }
++      }
++    };
++    // Do not join a thread from a DLL static destructor under Wine's loader
++    // lock. Drain on the last orderly device shutdown. Abrupt process exit
++    // keeps already-flushed batches and lets the OS reclaim this recorder.
++    Recorder& recorder() { static Recorder* instance = new Recorder(); return *instance; }
++    std::atomic<uint32_t> devices { 0 };
++  }
++  void profileDeviceCreated() { ++devices; }
++  void profileDeviceDestroyed() { if (devices.fetch_sub(1) == 1) recorder().shutdown(); }
++  void profileShutdown() { recorder().shutdown(); }
++  bool profileInitialize() {
++    recorder();
++    return profileState.load(std::memory_order_relaxed) == 1;
++  }
++  void profileEvent(const char* name, Clock::time_point begin, Clock::time_point end) {
++    recorder().event(name, begin, end);
++  }
++}
+diff --git a/src/util/util_profile.h b/src/util/util_profile.h
+new file mode 100644
+index 00000000..6974e867
+--- /dev/null
++++ b/src/util/util_profile.h
+@@ -0,0 +1,29 @@
++#pragma once
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++namespace dxvk {
++  // -1 requests lazy initialization; the steady disabled path is one load.
++  extern std::atomic<int32_t> profileState;
++  bool profileInitialize();
++  inline bool profileEnabled() {
++    const auto state = profileState.load(std::memory_order_relaxed);
++    return state < 0 ? profileInitialize() : state != 0;
++  }
++  void profileDeviceCreated();
++  void profileDeviceDestroyed();
++  void profileShutdown();
++  void profileEvent(const char* name, std::chrono::steady_clock::time_point begin,
++    std::chrono::steady_clock::time_point end);
++  class ProfileScope {
++    const char* m_name;
++    std::chrono::steady_clock::time_point m_begin;
++  public:
++    explicit ProfileScope(const char* name) : m_name(profileEnabled() ? name : nullptr) {
++      if (m_name) m_begin = std::chrono::steady_clock::now();
++    }
++    ~ProfileScope() {
++      if (m_name) profileEvent(m_name, m_begin, std::chrono::steady_clock::now());
++    }
++  };
++}
+diff --git a/src/util/util_shader_revision.h b/src/util/util_shader_revision.h
+new file mode 100644
+index 00000000..b9ba0f2b
+--- /dev/null
++++ b/src/util/util_shader_revision.h
+@@ -0,0 +1,2 @@
++#pragma once
++#define W101_SHADER_REVISION "aa1859ec0a18d4efd5a254f3a7e05dbeea149517ab96fdd98208925049a32590"
+diff --git a/src/vulkan/vulkan_diagnostics.h b/src/vulkan/vulkan_diagnostics.h
+new file mode 100644
+index 00000000..3285ac4f
+--- /dev/null
++++ b/src/vulkan/vulkan_diagnostics.h
+@@ -0,0 +1,49 @@
++#pragma once
++
++#include <algorithm>
++#include <atomic>
++#include <string>
++#include "vulkan_loader.h"
++#include "../util/log/log.h"
++#include "../util/util_env.h"
++
++namespace dxvk::vk {
++  inline bool diagnosticsEnabled() {
++    return env::getEnvVar("DXVK_DIAGNOSTICS") == "1";
++  }
++
++  // Per-category process-wide limit; never changes the failing API result.
++  inline bool diagnosticBudget(std::atomic<uint32_t>& count, const char* category) {
++    uint32_t n = count.fetch_add(1, std::memory_order_relaxed);
++    if (n == 32)
++      Logger::warn(str::format("DXVK diagnostics: further ", category, " messages suppressed after 32 failures"));
++    return n < 32;
++  }
++
++  inline VKAPI_ATTR VkBool32 VKAPI_CALL diagnosticCallback(
++      VkDebugUtilsMessageSeverityFlagBitsEXT,
++      VkDebugUtilsMessageTypeFlagsEXT,
++      const VkDebugUtilsMessengerCallbackDataEXT* data,
++      void*) {
++    static std::atomic<uint32_t> messages { 0 };
++    if (diagnosticBudget(messages, "Vulkan/Metal compiler")) {
++      // Driver messages can contain Metal compilation errors. Bound their size.
++      std::string message = data && data->pMessage ? data->pMessage : "(empty)";
++      message.resize(std::min<size_t>(message.size(), 4096));
++      Logger::warn(str::format("Vulkan/Metal [", data ? data->messageIdNumber : 0, "]: ", message));
++    }
++    return VK_FALSE;
++  }
++
++  inline VkDebugUtilsMessengerCreateInfoEXT diagnosticMessengerInfo() {
++    VkDebugUtilsMessengerCreateInfoEXT info = {};
++    info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
++    info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
++      | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
++    info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT
++      | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
++      | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
++    info.pfnUserCallback = diagnosticCallback;
++    return info;
++  }
++}
+diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
+index bbc3c931..b89628ac 100644
+--- a/src/vulkan/vulkan_loader.cpp
++++ b/src/vulkan/vulkan_loader.cpp
+@@ -1,4 +1,5 @@
+ #include "vulkan_loader.h"
++#include "vulkan_diagnostics.h"
+ 
+ namespace dxvk::vk {
+ 
+@@ -51,8 +52,22 @@ namespace dxvk::vk {
+   
+   
+   InstanceFn::InstanceFn(const Rc<LibraryLoader>& library, bool owned, VkInstance instance)
+-  : InstanceLoader(library, owned, instance) { }
++  : InstanceLoader(library, owned, instance) {
++    if (owned && diagnosticsEnabled()) {
++      auto create = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(sym("vkCreateDebugUtilsMessengerEXT"));
++      if (create) {
++        auto info = diagnosticMessengerInfo();
++        VkResult status = create(instance, &info, nullptr, &diagnosticMessenger);
++        if (status != VK_SUCCESS)
++          Logger::warn(str::format("DXVK diagnostics: messenger creation VkResult=", status));
++      }
++    }
++  }
+   InstanceFn::~InstanceFn() {
++    if (diagnosticMessenger) {
++      auto destroy = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(sym("vkDestroyDebugUtilsMessengerEXT"));
++      if (destroy) destroy(m_instance, diagnosticMessenger, nullptr);
++    }
+     if (m_owned)
+       this->vkDestroyInstance(m_instance, nullptr);
+   }
+diff --git a/src/vulkan/vulkan_loader.h b/src/vulkan/vulkan_loader.h
+index 20ce6996..a898ba50 100644
+--- a/src/vulkan/vulkan_loader.h
++++ b/src/vulkan/vulkan_loader.h
+@@ -4,6 +4,7 @@
+ #include "../util/rc/util_rc_ptr.h"
+ 
+ #define VK_USE_PLATFORM_WIN32_KHR 1
++#define VK_ENABLE_BETA_EXTENSIONS
+ #include <vulkan/vulkan.h>
+ 
+ #define VULKAN_FN(name) \
+@@ -91,6 +92,8 @@ namespace dxvk::vk {
+     InstanceFn(const Rc<LibraryLoader>& library, bool owned, VkInstance instance);
+     ~InstanceFn();
+     
++    VkDebugUtilsMessengerEXT diagnosticMessenger = VK_NULL_HANDLE;
++
+     VULKAN_FN(vkCreateDevice);
+     VULKAN_FN(vkDestroyInstance);
+     VULKAN_FN(vkEnumerateDeviceExtensionProperties);
+diff --git a/src/vulkan/vulkan_presenter.cpp b/src/vulkan/vulkan_presenter.cpp
+index aad45d9f..8914fc7c 100644
+--- a/src/vulkan/vulkan_presenter.cpp
++++ b/src/vulkan/vulkan_presenter.cpp
+@@ -1,4 +1,5 @@
+ #include "vulkan_presenter.h"
++#include "../util/util_profile.h"
+ 
+ #include "../dxvk/dxvk_format.h"
+ 
+@@ -48,6 +49,7 @@ namespace dxvk::vk {
+ 
+     // Don't acquire more than one image at a time
+     if (m_acquireStatus == VK_NOT_READY) {
++      ProfileScope profile("swapchain_acquisition_wait");
+       m_acquireStatus = m_vkd->vkAcquireNextImageKHR(m_vkd->device(),
+         m_swapchain, std::numeric_limits<uint64_t>::max(),
+         sync.acquire, VK_NULL_HANDLE, &m_imageIndex);
+@@ -74,7 +76,10 @@ namespace dxvk::vk {
+     info.pImageIndices      = &m_imageIndex;
+     info.pResults           = nullptr;
+ 
+-    VkResult status = m_vkd->vkQueuePresentKHR(m_device.queue, &info);
++    VkResult status;
++    { ProfileScope profile("queue_presentation_wait");
++      status = m_vkd->vkQueuePresentKHR(m_device.queue, &info);
++    }
+ 
+     if (status != VK_SUCCESS && status != VK_SUBOPTIMAL_KHR)
+       return status;
+@@ -86,9 +91,11 @@ namespace dxvk::vk {
+ 
+     sync = m_semaphores.at(m_frameIndex);
+ 
+-    m_acquireStatus = m_vkd->vkAcquireNextImageKHR(m_vkd->device(),
+-      m_swapchain, std::numeric_limits<uint64_t>::max(),
+-      sync.acquire, VK_NULL_HANDLE, &m_imageIndex);
++    { ProfileScope profile("swapchain_acquisition_wait");
++      m_acquireStatus = m_vkd->vkAcquireNextImageKHR(m_vkd->device(),
++        m_swapchain, std::numeric_limits<uint64_t>::max(),
++        sync.acquire, VK_NULL_HANDLE, &m_imageIndex);
++    }
+ 
+     bool vsync = m_info.presentMode == VK_PRESENT_MODE_FIFO_KHR
+               || m_info.presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR;

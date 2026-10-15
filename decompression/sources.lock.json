@@ -1,0 +1,14 @@
+{
+  "libdeflate": {
+    "version": "1.26",
+    "revision": "92e6a0db9fa848d742f9eb286c92afc60f2c3dda",
+    "url": "https://codeload.github.com/ebiggers/libdeflate/tar.gz/92e6a0db9fa848d742f9eb286c92afc60f2c3dda",
+    "sha256": "af56498149827f5a5e3f1ffb653c79c8c75557f3dc2caf6002cac38a59b844b7"
+  },
+  "zlib-ng": {
+    "version": "2.3.3",
+    "revision": "12731092979c6d07f42da27da673a9f6c7b13586",
+    "url": "https://codeload.github.com/zlib-ng/zlib-ng/tar.gz/12731092979c6d07f42da27da673a9f6c7b13586",
+    "sha256": "a0d2a5d122c84b56a793a1553a9c3327fb2eb7469bf7a86b79e3c7be5d92e8d6"
+  }
+}

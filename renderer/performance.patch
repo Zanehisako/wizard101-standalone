@@ -1,0 +1,253 @@
+diff --git a/src/util/util_pipeline_opt.h b/src/util/util_pipeline_opt.h
+new file mode 100644
+--- /dev/null
++++ b/src/util/util_pipeline_opt.h
+@@ -0,0 +1,30 @@
++#pragma once
++#include "util_env.h"
++#include "log/log.h"
++
++namespace dxvk {
++  enum class W101PipelineOpt { Off, Replay, Lookup, Both };
++  inline W101PipelineOpt parsePipelineOpt(const std::string& value) {
++    if (value == "replay") return W101PipelineOpt::Replay;
++    if (value == "lookup") return W101PipelineOpt::Lookup;
++    if (value == "both") return W101PipelineOpt::Both;
++    return W101PipelineOpt::Off;
++  }
++  inline W101PipelineOpt pipelineOpt() {
++    static const auto mode = [] {
++      const auto value = env::getEnvVar("DXVK_W101_PIPELINE_OPT");
++      if (!value.empty() && value != "off" && value != "replay" && value != "lookup" && value != "both")
++        Logger::warn("W101 invalid pipeline optimization mode; using off");
++      const auto parsed = parsePipelineOpt(value);
++      Logger::info("W101 pipeline optimizations: " + (parsed == W101PipelineOpt::Off ? std::string("off") : value));
++      return parsed;
++    }();
++    return mode;
++  }
++  inline bool replayOpt() {
++    return pipelineOpt() == W101PipelineOpt::Replay || pipelineOpt() == W101PipelineOpt::Both;
++  }
++  inline bool lookupOpt() {
++    return pipelineOpt() == W101PipelineOpt::Lookup || pipelineOpt() == W101PipelineOpt::Both;
++  }
++}
+diff --git a/src/dxvk/dxvk_graphics.h b/src/dxvk/dxvk_graphics.h
+--- a/src/dxvk/dxvk_graphics.h
++++ b/src/dxvk/dxvk_graphics.h
+@@ -1,6 +1,9 @@
+ #pragma once
+ 
+ #include <mutex>
++#include <array>
++#include <cstring>
++#include "../util/util_pipeline_opt.h"
+ 
+ #include "../util/sync/sync_list.h"
+ 
+@@ -136,6 +139,43 @@
+   };
+ 
+   
++  // Instances and index nodes live until the owning pipeline is destroyed.
++  // Readers acquire immutable nodes; only the compilation mutex admits writers.
++  class DxvkGraphicsPipelineLookup {
++  public:
++    static size_t bucket(const DxvkGraphicsPipelineStateInfo& state, const DxvkRenderPass* pass) {
++      // Equality compares every packed byte, including reserved bytes.
++      uint64_t hash = 0xcbf29ce484222325ull;
++      const auto bytes = reinterpret_cast<const unsigned char*>(&state);
++      for (size_t i = 0; i < sizeof(state); i += sizeof(uint64_t)) {
++        uint64_t word;
++        std::memcpy(&word, bytes + i, sizeof(word));
++        hash = (hash ^ word) * 0x100000001b3ull;
++        hash ^= hash >> 32;
++      }
++      hash = (hash ^ reinterpret_cast<uintptr_t>(pass)) * 0x100000001b3ull;
++      return (hash ^ (hash >> 32)) & 63;
++    }
++    DxvkGraphicsPipelineInstance* find(const DxvkGraphicsPipelineStateInfo& state, const DxvkRenderPass* pass) {
++      auto last = m_last.load(std::memory_order_acquire);
++      if (last && last->isCompatible(state, pass)) return last;
++      for (auto instance : m_buckets[bucket(state, pass)]) {
++        if (instance->isCompatible(state, pass)) {
++          m_last.store(instance, std::memory_order_release);
++          return instance;
++        }
++      }
++      return nullptr;
++    }
++    void publish(DxvkGraphicsPipelineInstance* instance, const DxvkGraphicsPipelineStateInfo& state, const DxvkRenderPass* pass) {
++      m_buckets[bucket(state, pass)].insert(instance);
++      m_last.store(instance, std::memory_order_release);
++    }
++  private:
++    std::atomic<DxvkGraphicsPipelineInstance*> m_last { nullptr };
++    std::array<sync::List<DxvkGraphicsPipelineInstance*>, 64> m_buckets;
++  };
++
+   /**
+    * \brief Graphics pipeline
+    * 
+@@ -246,6 +286,8 @@
+     alignas(CACHE_LINE_SIZE)
+     dxvk::mutex                               m_mutex2;
+     sync::List<DxvkGraphicsPipelineInstance>  m_pipelines;
++    const bool m_lookupEnabled = lookupOpt();
++    DxvkGraphicsPipelineLookup m_lookup;
+     
+     DxvkGraphicsPipelineInstance* createInstance(
+       const DxvkGraphicsPipelineStateInfo& state,
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -148,13 +148,18 @@
+ 
+     std::lock_guard<dxvk::mutex> lock(m_mutex2);
+     m_pipeMgr->m_numGraphicsPipelines += 1;
+-    return &(*m_pipelines.emplace(state, renderPass, pipeline));
++    auto instance = &(*m_pipelines.emplace(state, renderPass, pipeline));
++    // Preserve the baseline null-handle failure entry as well as successful
++    // instances: failed draws must never resolve to a colliding valid pipeline.
++    if (m_lookupEnabled) m_lookup.publish(instance, state, renderPass);
++    return instance;
+   }
+   
+   
+   DxvkGraphicsPipelineInstance* DxvkGraphicsPipeline::findInstance(
+     const DxvkGraphicsPipelineStateInfo& state,
+     const DxvkRenderPass*                renderPass) {
++    if (m_lookupEnabled) return m_lookup.find(state, renderPass);
+     std::lock_guard<dxvk::mutex> lock(m_mutex2);
+     for (auto& instance : m_pipelines) {
+       if (instance.isCompatible(state, renderPass))
+diff --git a/src/dxvk/dxvk_state_cache.h b/src/dxvk/dxvk_state_cache.h
+--- a/src/dxvk/dxvk_state_cache.h
++++ b/src/dxvk/dxvk_state_cache.h
+@@ -6,6 +6,8 @@
+ #include <mutex>
+ #include <queue>
+ #include <unordered_map>
++#include <unordered_set>
++#include "../util/util_pipeline_opt.h"
+ #include <vector>
+ 
+ #include "dxvk_state_cache_types.h"
+@@ -87,6 +89,7 @@
+     }
+ 
+   private:
++    friend struct PipelineOptimizationProbe;
+ 
+     using WriterItem = DxvkStateCacheEntry;
+ 
+@@ -115,6 +118,13 @@
+     std::unordered_map<
+       DxvkShaderKey, Rc<DxvkShader>,
+       DxvkHash, DxvkEq> m_shaderMap;
++
++    // Protected by m_entryLock. Entries are never erased during this cache
++    // lifetime; each job traverses every cached state for its complete key.
++    const bool m_replayEnabled = replayOpt();
++    uint64_t m_replayJobs = 0;
++    std::atomic<uint64_t> m_replayChecks { 0 };
++    std::unordered_set<DxvkStateCacheKey, DxvkHash, DxvkEq> m_replayQueued;
+ 
+     dxvk::mutex                       m_workerLock;
+     dxvk::condition_variable          m_workerCond;
+diff --git a/src/dxvk/dxvk_state_cache.cpp b/src/dxvk/dxvk_state_cache.cpp
+--- a/src/dxvk/dxvk_state_cache.cpp
++++ b/src/dxvk/dxvk_state_cache.cpp
+@@ -256,6 +256,7 @@
+     
+     // Add the shader so we can look it up by its key
+     std::unique_lock<dxvk::mutex> entryLock(m_entryLock);
++    if (m_stopThreads.load()) return;
+     m_shaderMap.insert({ key, shader });
+ 
+     // Deferred lock, don't stall workers unless we have to
+@@ -264,6 +265,7 @@
+     auto pipelines = m_pipelineMap.equal_range(key);
+ 
+     for (auto p = pipelines.first; p != pipelines.second; p++) {
++      if (m_replayEnabled && m_replayQueued.count(p->second)) continue;
+       WorkerItem item;
+ 
+       if (!getShaderByKey(p->second.vs,  item.gp.vs)
+@@ -277,8 +279,12 @@
+       if (!workerLock)
+         workerLock = std::unique_lock<dxvk::mutex>(m_workerLock);
+       
++      // Shutdown takes the same worker lock. Never admit a job after stop.
++      if (m_stopThreads.load()) break;
+       m_workerQueue.push(item);
++      if (m_replayEnabled) m_replayQueued.insert(p->second);
+       m_workerPending += 1;
++      ++m_replayJobs;
+     }
+ 
+     if (workerLock) {
+@@ -289,7 +295,8 @@
+ 
+ 
+   void DxvkStateCache::stopWorkerThreads() {
+-    { std::lock_guard<dxvk::mutex> workerLock(m_workerLock);
++    { std::lock_guard<dxvk::mutex> entryLock(m_entryLock);
++      std::lock_guard<dxvk::mutex> workerLock(m_workerLock);
+       std::lock_guard<dxvk::mutex> writerLock(m_writerLock);
+ 
+       if (m_stopThreads.exchange(true))
+@@ -301,9 +308,15 @@
+ 
+     for (auto& worker : m_workerThreads)
+       worker.join();
++    // Running work has completed; cancel queued jobs with accurate accounting.
++    { std::lock_guard<dxvk::mutex> lock(m_workerLock);
++      while (!m_workerQueue.empty()) { m_workerQueue.pop(); m_workerPending -= 1; }
++    }
+     
+     if (m_writerThread.joinable())
+       m_writerThread.join();
++    Logger::info(str::format("W101 replay: jobs=", m_replayJobs,
++      " state_checks=", m_replayChecks.load(), " pending=", m_workerPending.load()));
+   }
+ 
+ 
+@@ -351,11 +364,13 @@
+     key.fs  = getShaderKey(item.gp.fs);
+     key.cs  = getShaderKey(item.cp.cs);
+ 
++    uint64_t checks = 0;
+     if (item.cp.cs == nullptr) {
+       auto pipeline = m_pipeManager->createGraphicsPipeline(item.gp);
+       auto entries = m_entryMap.equal_range(key);
+ 
+       for (auto e = entries.first; e != entries.second; e++) {
++        ++checks;
+         const auto& entry = m_entries[e->second];
+ 
+         if (m_passManager->validateRenderPassFormat(entry.format)) {
+@@ -368,10 +383,12 @@
+       auto entries = m_entryMap.equal_range(key);
+ 
+       for (auto e = entries.first; e != entries.second; e++) {
++        ++checks;
+         const auto& entry = m_entries[e->second];
+         pipeline->compilePipeline(entry.cpState);
+       }
+     }
++    m_replayChecks.fetch_add(checks, std::memory_order_relaxed);
+   }
+ 
+ 
+@@ -938,7 +955,8 @@
+         m_workerQueue.pop();
+       }
+ 
+-      compilePipelines(item);
++      try { compilePipelines(item); }
++      catch (const std::exception& error) { Logger::err(str::format("W101 replay job failed: ", error.what())); }
+       m_workerPending -= 1;
+     }
+   }

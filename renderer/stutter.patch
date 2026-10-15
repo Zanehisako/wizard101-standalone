@@ -1,0 +1,360 @@
+diff --git a/src/d3d9/d3d9_warmup.cpp b/src/d3d9/d3d9_warmup.cpp
+index aa40c60..277aa4f 100644
+--- a/src/d3d9/d3d9_warmup.cpp
++++ b/src/d3d9/d3d9_warmup.cpp
+@@ -73,7 +73,8 @@ namespace dxvk {
+     Record r { stage, std::vector<uint32_t>(bytes / 4) };
+     std::memcpy(r.words.data(), data, bytes);
+     if (valid(r) && add(std::move(r))) {
+-      m_dirty = true; m_last = Clock::now(); m_cond.notify_all();
++      m_dirty = true;
++      if (!m_shutdownOnly) { m_last = Clock::now(); m_cond.notify_all(); }
+     }
+   }
+   void W101ShaderCatalog::waitStartup() {
+@@ -124,7 +125,11 @@ namespace dxvk {
+       while (!m_stop.load() && m_busy()) m_cond.wait_for(lock, std::chrono::milliseconds(10));
+     }
+     { std::lock_guard<dxvk::mutex> lock(m_lock); m_warmDone = true; m_cond.notify_all(); }
+-    while (!m_stop.load()) {
++    if (m_shutdownOnly) {
++      std::unique_lock<dxvk::mutex> lock(m_lock);
++      m_cond.wait(lock, [this] { return m_stop.load(); });
++    }
++    while (!m_shutdownOnly && !m_stop.load()) {
+       std::unique_lock<dxvk::mutex> lock(m_lock);
+       m_cond.wait(lock, [this] { return m_stop.load() || (m_dirty && !m_path.empty()); });
+       if (m_stop.load()) break;
+diff --git a/src/d3d9/d3d9_warmup.h b/src/d3d9/d3d9_warmup.h
+index 8eff2fc..b07e868 100644
+--- a/src/d3d9/d3d9_warmup.h
++++ b/src/d3d9/d3d9_warmup.h
+@@ -2,6 +2,7 @@
+ #include "../util/util_cache_file.h"
+ #include "../util/thread.h"
+ #include <atomic>
++#include "../util/util_pipeline_compile.h"
+ #include <functional>
+ #include <unordered_map>
+ 
+@@ -24,6 +25,7 @@ namespace dxvk {
+     static bool decode(const std::vector<char>& data, std::vector<Record>& records);
+     static std::vector<char> encode(const std::vector<Record>& records);
+   private:
++    const bool m_shutdownOnly = w101StutterFix();
+     std::string m_path;
+     Sha1Hash m_key;
+     bool m_warm;
+diff --git a/src/dxvk/dxvk_compute.cpp b/src/dxvk/dxvk_compute.cpp
+index 7371377..550e1b5 100644
+--- a/src/dxvk/dxvk_compute.cpp
++++ b/src/dxvk/dxvk_compute.cpp
+@@ -50,6 +50,14 @@ namespace dxvk {
+       auto identity = captureIdentity(m_shaders, state, "foreground");
+       WarmupGate::Foreground request(m_pipeMgr->warmupGate());
+       ProfileScope foreground("compute_pipeline_foreground_request");
++      if (m_stutterFix) {
++        instance = m_compilation.get(state, nullptr, [&] {
++          auto result = this->createInstance(state);
++          this->writePipelineStateToCache(state);
++          return result;
++        });
++        return instance->pipeline();
++      }
+       std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
+       { ProfileScope timing("compute_pipeline_foreground_lock_wait"); lock.lock(); }
+       instance = this->findInstance(state);
+@@ -70,6 +78,11 @@ namespace dxvk {
+     WarmupGate::Background permit(m_pipeMgr->warmupGate());
+     if (!permit) return;
+     ProfileScope background("compute_pipeline_background_request");
++    if (m_stutterFix) {
++      if (!this->findInstance(state))
++        m_compilation.get(state, nullptr, [&] { return this->createInstance(state); });
++      return;
++    }
+     std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
+     { ProfileScope timing("compute_pipeline_background_lock_wait"); lock.lock(); }
+ 
+diff --git a/src/dxvk/dxvk_compute.h b/src/dxvk/dxvk_compute.h
+index 186d17e..c9b6074 100644
+--- a/src/dxvk/dxvk_compute.h
++++ b/src/dxvk/dxvk_compute.h
+@@ -1,4 +1,5 @@
+ #pragma once
++#include "../util/util_pipeline_compile.h"
+ 
+ #include <vector>
+ 
+@@ -145,6 +146,8 @@ namespace dxvk {
+     Rc<DxvkPipelineLayout>      m_layout;
+     
+     alignas(CACHE_LINE_SIZE)
++    const bool m_stutterFix = w101StutterFix();
++    PipelineCompilation<DxvkComputePipelineStateInfo, DxvkComputePipelineInstance*> m_compilation;
+     dxvk::mutex                             m_mutex;
+     sync::List<DxvkComputePipelineInstance> m_pipelines;
+     
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index 3c47c6a..723632b 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -96,6 +96,15 @@ namespace dxvk {
+       if (!this->validatePipelineState(state, true))
+         return VK_NULL_HANDLE;
+ 
++      if (m_stutterFix) {
++        instance = m_compilation.get(state, renderPass, [&] {
++          auto result = this->createInstance(state, renderPass);
++          this->writePipelineStateToCache(state, renderPass->format());
++          return result;
++        });
++        return instance->pipeline();
++      }
++
+       // Prevent other threads from adding new instances and check again
+       std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
+       { ProfileScope timing("graphics_pipeline_foreground_lock_wait"); lock.lock(); }
+@@ -131,6 +140,13 @@ namespace dxvk {
+     WarmupGate::Background permit(m_pipeMgr->warmupGate());
+     if (!permit) return false;
+     ProfileScope background("graphics_pipeline_background_request");
++    if (m_stutterFix) {
++      if (this->findInstance(state, renderPass)) return false;
++      bool created = false;
++      m_compilation.get(state, renderPass,
++        [&] { return this->createInstance(state, renderPass); }, &created);
++      return created;
++    }
+     // Keep the object locked while compiling a pipeline since compiling
+     // similar pipelines concurrently is fragile on some drivers
+     std::unique_lock<dxvk::mutex> lock(m_mutex, std::defer_lock);
+diff --git a/src/dxvk/dxvk_graphics.h b/src/dxvk/dxvk_graphics.h
+index 21274fd..e4fb26c 100644
+--- a/src/dxvk/dxvk_graphics.h
++++ b/src/dxvk/dxvk_graphics.h
+@@ -1,4 +1,5 @@
+ #pragma once
++#include "../util/util_pipeline_compile.h"
+ 
+ #include <mutex>
+ 
+@@ -242,6 +243,8 @@ namespace dxvk {
+     
+     // List of pipeline instances, shared between threads
+     alignas(CACHE_LINE_SIZE)
++    const bool m_stutterFix = w101StutterFix();
++    PipelineCompilation<DxvkGraphicsPipelineStateInfo, DxvkGraphicsPipelineInstance*> m_compilation;
+     dxvk::mutex                               m_mutex;
+     alignas(CACHE_LINE_SIZE)
+     dxvk::mutex                               m_mutex2;
+diff --git a/src/dxvk/dxvk_pipecache.cpp b/src/dxvk/dxvk_pipecache.cpp
+index 090a443..24e61ec 100644
+--- a/src/dxvk/dxvk_pipecache.cpp
++++ b/src/dxvk/dxvk_pipecache.cpp
+@@ -9,8 +9,8 @@
+ namespace dxvk {
+   DxvkPipelineCache::DxvkPipelineCache(const Rc<vk::DeviceFn>& vkd,
+     const VkPhysicalDeviceProperties& props)
+-  : m_warmup(env::getEnvVar("DXVK_W101_WARMUP") == "1"
+-      && (env::getExeName() == "WizardGraphicalClient.exe" || !env::getEnvVar("DXVK_W101_CATALOG_PATH").empty())), m_vkd(vkd) {
++  : m_warmup(m_shutdownOnly || (env::getEnvVar("DXVK_W101_WARMUP") == "1"
++      && (env::getExeName() == "WizardGraphicalClient.exe" || !env::getEnvVar("DXVK_W101_CATALOG_PATH").empty()))), m_vkd(vkd) {
+     try {
+     const auto dirOverride = env::getEnvVar("DXVK_W101_CACHE_PATH");
+     if (env::getExeName() != "WizardGraphicalClient.exe" && dirOverride.empty()) return;
+@@ -70,8 +70,11 @@ namespace dxvk {
+   void DxvkPipelineCache::changed() {
+     if (!m_cache || m_bypass.load()) return;
+     std::lock_guard<dxvk::mutex> lock(m_lock);
+-    ++m_generation; m_last = std::chrono::steady_clock::now();
+-    m_cond.notify_one();
++    ++m_generation;
++    if (!m_shutdownOnly) {
++      m_last = std::chrono::steady_clock::now();
++      m_cond.notify_one();
++    }
+   }
+ 
+   VkResult DxvkPipelineCache::createGraphics(const VkGraphicsPipelineCreateInfo* info, VkPipeline* pipeline) {
+@@ -143,6 +146,13 @@ namespace dxvk {
+     env::setThreadName("w101-pipeline-cache");
+     ::SetThreadPriority(::GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+     try {
++      if (m_shutdownOnly) {
++        std::unique_lock<dxvk::mutex> lock(m_lock);
++        m_cond.wait(lock, [this] { return m_stop; });
++        lock.unlock();
++        if (!m_path.empty()) save(true);
++        return;
++      }
+       for (;;) {
+         std::unique_lock<dxvk::mutex> lock(m_lock);
+         // Stay asleep while clean or after a permanent storage failure.
+diff --git a/src/dxvk/dxvk_pipecache.h b/src/dxvk/dxvk_pipecache.h
+index 0d6d011..9b797b9 100644
+--- a/src/dxvk/dxvk_pipecache.h
++++ b/src/dxvk/dxvk_pipecache.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include <atomic>
++#include "../util/util_pipeline_compile.h"
+ #include <shared_mutex>
+ #include <vector>
+ #include "../util/util_warmup.h"
+@@ -20,6 +21,7 @@ namespace dxvk {
+     void stop();
+     WarmupGate& warmupGate() { return m_warmup; }
+   private:
++    const bool m_shutdownOnly = w101StutterFix();
+     WarmupGate m_warmup;
+     Rc<vk::DeviceFn> m_vkd;
+     VkPipelineCache m_cache = VK_NULL_HANDLE;
+diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
+index 5f8b31d..7eda25b 100644
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -21,7 +21,8 @@ namespace dxvk {
+   
+   
+   DxvkPipelineManager::~DxvkPipelineManager() {
+-    
++    // Quiesce replay before destroying the per-state records and instances.
++    if (!this_thread::isInModuleDetachment()) stopWorkerThreads();
+   }
+   
+   
+diff --git a/src/dxvk/dxvk_state_cache.cpp b/src/dxvk/dxvk_state_cache.cpp
+index 88cb52f..db1c82a 100644
+--- a/src/dxvk/dxvk_state_cache.cpp
++++ b/src/dxvk/dxvk_state_cache.cpp
+@@ -249,6 +249,7 @@ namespace dxvk {
+ 
+ 
+   void DxvkStateCache::registerShader(const Rc<DxvkShader>& shader) {
++    if (m_stopThreads.load()) return;
+     DxvkShaderKey key = shader->getShaderKey();
+ 
+     if (key.eq(g_nullShaderKey))
+@@ -277,6 +278,7 @@ namespace dxvk {
+       if (!workerLock)
+         workerLock = std::unique_lock<dxvk::mutex>(m_workerLock);
+       
++      if (m_stopThreads.load()) return;
+       m_workerQueue.push(item);
+       m_workerPending += 1;
+     }
+@@ -301,6 +303,9 @@ namespace dxvk {
+ 
+     for (auto& worker : m_workerThreads)
+       worker.join();
++    { std::lock_guard<dxvk::mutex> lock(m_workerLock);
++      while (!m_workerQueue.empty()) { m_workerQueue.pop(); --m_workerPending; }
++    }
+     
+     if (m_writerThread.joinable())
+       m_writerThread.join();
+@@ -938,7 +943,9 @@ namespace dxvk {
+         m_workerQueue.pop();
+       }
+ 
+-      compilePipelines(item);
++      try { compilePipelines(item); }
++      catch (const std::exception& error) { Logger::err(str::format("W101 replay job failed: ", error.what())); }
++      catch (...) { Logger::err("W101 replay job failed"); }
+       m_workerPending -= 1;
+     }
+   }
+diff --git a/src/dxvk/dxvk_state_cache.h b/src/dxvk/dxvk_state_cache.h
+index 6abdbc0..65786ef 100644
+--- a/src/dxvk/dxvk_state_cache.h
++++ b/src/dxvk/dxvk_state_cache.h
+@@ -24,6 +24,7 @@ namespace dxvk {
+    * draw.
+    */
+   class DxvkStateCache : public RcObject {
++    friend struct RenderingProbe;
+ 
+   public:
+ 
+diff --git a/src/util/util_pipeline_compile.h b/src/util/util_pipeline_compile.h
+new file mode 100644
+index 0000000..c5c6623
+--- /dev/null
++++ b/src/util/util_pipeline_compile.h
+@@ -0,0 +1,75 @@
++#pragma once
++#include "thread.h"
++#include "util_env.h"
++#include <exception>
++#include <memory>
++#include <unordered_map>
++
++namespace dxvk {
++  inline bool w101StutterFix() {
++    return env::getEnvVar("DXVK_W101_STUTTER_FIX") == "1";
++  }
++
++  // Only table access and publication hold the lock. Each exact state/pass
++  // shares one result, including null handles and exceptions. Unrelated states
++  // enter the driver concurrently; its own cache/Metal locks remain intact.
++  template<typename State, typename Result>
++  class PipelineCompilation {
++    struct Key {
++      State state;
++      const void* pass;
++      bool operator == (const Key& other) const {
++        return pass == other.pass && state == other.state;
++      }
++    };
++    struct Hash {
++      size_t operator () (const Key& key) const {
++        // These packed states use complete byte equality, including their
++        // zero-initialized padding. Hash collisions still require exact equality.
++        size_t hash = 2166136261u;
++        const auto bytes = reinterpret_cast<const unsigned char*>(&key.state);
++        for (size_t i = 0; i < sizeof(State); ++i) hash = (hash ^ bytes[i]) * 16777619u;
++        return hash ^ std::hash<const void*>()(key.pass);
++      }
++    };
++    struct Entry {
++      dxvk::condition_variable ready;
++      bool complete = false;
++      Result result = {};
++      std::exception_ptr failure;
++    };
++    dxvk::mutex m_lock;
++    std::unordered_map<Key, std::shared_ptr<Entry>, Hash> m_states;
++  public:
++    template<typename Compile>
++    Result get(const State& state, const void* pass, Compile&& compile, bool* created = nullptr) {
++      std::shared_ptr<Entry> entry;
++      {
++        std::unique_lock<dxvk::mutex> lock(m_lock);
++        auto found = m_states.find(Key { state, pass });
++        if (found != m_states.end()) {
++          entry = found->second;
++          entry->ready.wait(lock, [&] { return entry->complete; });
++          if (created) *created = false;
++          if (entry->failure) std::rethrow_exception(entry->failure);
++          return entry->result;
++        }
++        entry = std::make_shared<Entry>();
++        m_states.emplace(Key { state, pass }, entry);
++      }
++      Result result = {};
++      std::exception_ptr failure;
++      try { result = compile(); } catch (...) { failure = std::current_exception(); }
++      {
++        std::lock_guard<dxvk::mutex> lock(m_lock);
++        entry->result = result;
++        entry->failure = failure;
++        entry->complete = true;
++        entry->ready.notify_all();
++      }
++      if (created) *created = true;
++      if (failure) std::rethrow_exception(failure);
++      return result;
++    }
++  };
++}

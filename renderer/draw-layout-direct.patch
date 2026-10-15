@@ -1,0 +1,60 @@
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -1256,6 +1256,8 @@
+     uint32_t                        m_frameLatency = DefaultFrameLatency;
+ 
+     D3D9Initializer*                m_initializer = nullptr;
++    bool m_drawLayoutDirect = false;
++    bool m_drawLayoutDirectTest = false;
+     D3D9FormatHelper*               m_converter   = nullptr;
+     std::unique_ptr<wizard101::PreparationWorkers> m_assetWorkers;
+ 
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -18,6 +18,7 @@
+ #include "d3d9_names.h"
+ #include "d3d9_format_helpers.h"
+ #include "wizard101_asset_preparation.h"
++#include "wizard101_draw_layout_direct.h"
+ 
+ #include "../dxvk/dxvk_adapter.h"
+ #include "../dxvk/dxvk_instance.h"
+@@ -70,6 +71,9 @@
+ 
+     m_initializer      = new D3D9Initializer(m_dxvkDevice);
+     m_converter        = new D3D9FormatHelper(m_dxvkDevice);
++    m_drawLayoutDirect = env::getEnvVar("W101_DRAW_LAYOUT_DIRECT") == "1";
++    m_drawLayoutDirectTest = env::getEnvVar("W101_PERFORMANCE_TEST") == "1"
++      && env::getEnvVar("W101_DRAW_LAYOUT_DIRECT_TEST") == "stats";
+     wizard101::registerAssetDevice(this);
+     if (wizard101::feature("W101_ASSET_WORKERS", "2")) {
+       try { m_assetWorkers.reset(new wizard101::PreparationWorkers()); }
+@@ -7120,6 +7124,8 @@
+         vertexShader = m_state.vertexShader;
+ 
+       EmitCs([
++        cDirect          = m_drawLayoutDirect,
++        cDirectTest      = m_drawLayoutDirectTest,
+         &cIaState         = m_iaState,
+         cVertexDecl       = std::move(vertexDecl),
+         cVertexShader     = std::move(vertexShader),
+@@ -7140,6 +7146,19 @@
+         const auto& isgn = cVertexShader != nullptr
+           ? GetCommonShader(cVertexShader)->GetIsgn()
+           : GetFixedFunctionIsgn();
++
++        if (cDirect) {
++          wizard101::DirectDrawLayout layout;
++          if (wizard101::tryBuildDirectDrawLayout(elements, isgn, cStreamFreq, cStreamsInstanced, layout)) {
++            cIaState.streamsUsed = layout.streamsUsed;
++            cIaState.streamsInstanced = layout.streamsInstanced;
++            ctx->setInputLayout(layout.attributeCount, layout.attributes.data(),
++              layout.bindingCount, layout.bindings.data());
++            if (cDirectTest) Logger::info("W101 direct layout: vector");
++            return;
++          }
++          if (cDirectTest) Logger::info("W101 direct layout: fallback");
++        }
+ 
+         for (uint32_t i = 0; i < isgn.elemCount; i++) {
+           const auto& decl = isgn.elems[i];

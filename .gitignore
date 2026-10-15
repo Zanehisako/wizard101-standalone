@@ -1,0 +1,13 @@
+/cache/
+/dist/
+/verification-local/
+/work/
+__pycache__/
+*.pyc
+*.w101shaders
+*.w101assets
+*.vkcache
+*.dxvk-cache
+*.dxso
+*.spv
+.DS_Store

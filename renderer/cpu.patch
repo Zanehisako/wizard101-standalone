@@ -1,0 +1,458 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index cbdc410..c1c2c3d 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -5577,6 +5577,7 @@ namespace dxvk {
+       return;
+ 
+     constSet.dirty = false;
++    profileCount(CpuCounter::ConstantUploads);
+ 
+     uint32_t floatCount = m_vsFloatConstsCount;
+     if (constSet.meta.needsConstantCopies) {
+@@ -5639,6 +5640,7 @@ namespace dxvk {
+       return;
+ 
+     constSet.dirty = false;
++    profileCount(CpuCounter::ConstantUploads);
+ 
+     uint32_t floatCount = ShaderStage == DxsoProgramType::VertexShader ? m_vsFloatConstsCount : m_psFloatConstsCount;
+     if (constSet.meta.needsConstantCopies) {
+@@ -7290,6 +7292,14 @@ namespace dxvk {
+       }
+     }
+ 
++    profileCount(CpuCounter::ConstantSets);
++    if (m_cpuConstantsOpt && StateConstantsUnchanged<ProgramType, ConstantType, T>(
++        &m_state, StartRegister, pConstantData, Count,
++        m_d3d9Options.d3d9FloatEmulation == D3D9FloatEmulation::Enabled)) {
++      profileCount(CpuCounter::ConstantUnchanged);
++      return D3D_OK;
++    }
++
+     if constexpr (ConstantType != D3D9ConstantType::Bool) {
+       uint32_t maxCount = ConstantType == D3D9ConstantType::Float
+         ? m_consts[ProgramType].meta.maxConstIndexF
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+index f3e4696..cd9b447 100644
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -1299,6 +1299,7 @@ namespace dxvk {
+       Com<D3D9VertexDecl,
+       false>>                       m_fvfTable;
+ 
++    const bool                     m_cpuConstantsOpt = cpuConstantsOptimized();
+     D3D9Multithread                 m_multithread;
+     D3D9InputAssemblyState          m_iaState;
+ 
+diff --git a/src/d3d9/d3d9_main.cpp b/src/d3d9/d3d9_main.cpp
+index 22eced9..e1199c3 100644
+--- a/src/d3d9/d3d9_main.cpp
++++ b/src/d3d9/d3d9_main.cpp
+@@ -6,6 +6,8 @@
+ #include "d3d9_annotation.h"
+ #include "wizard101_cursor.h"
+ #include "wizard101_io_profile.h"
++#include "wizard101_texture_profile.h"
++#include "../util/util_cpu_opt.h"
+ 
+ class D3DFE_PROCESSVERTICES;
+ using PSGPERRORID = UINT;
+@@ -23,6 +25,8 @@ namespace dxvk {
+ #ifdef _WIN32
+     wizard101::InstallCursorHook();
+     wizard101::InstallIoProfileHooks();
++    wizard101::InstallTextureProfileHooks();
++    Logger::info(str::format("W101 CPU optimizations: ", cpuOptimizationName()));
+ #endif
+     *ppDirect3D9Ex = ref(new D3D9InterfaceEx( Extended ));
+     return D3D_OK;
+diff --git a/src/d3d9/d3d9_multithread.h b/src/d3d9/d3d9_multithread.h
+index f91857b..3e484e0 100644
+--- a/src/d3d9/d3d9_multithread.h
++++ b/src/d3d9/d3d9_multithread.h
+@@ -1,6 +1,8 @@
+ #pragma once
+ 
+ #include "d3d9_include.h"
++#include "../util/util_cpu_opt.h"
++#include "../util/util_profile.h"
+ 
+ namespace dxvk {
+ 
+@@ -19,9 +21,13 @@ namespace dxvk {
+     D3D9DeviceLock()
+       : m_mutex(nullptr) { }
+ 
+-    D3D9DeviceLock(sync::RecursiveSpinlock& mutex)
++    D3D9DeviceLock(sync::RecursiveSpinlock& mutex, bool fast = false)
+       : m_mutex(&mutex) {
+-      mutex.lock();
++      bool recursive = false;
++      if (fast) recursive = mutex.lockRecursiveFast();
++      else mutex.lock();
++      profileCount(CpuCounter::DeviceLocks);
++      if (recursive) profileCount(CpuCounter::RecursiveFastLocks);
+     }
+ 
+     D3D9DeviceLock(D3D9DeviceLock&& other)
+@@ -30,6 +36,7 @@ namespace dxvk {
+     }
+ 
+     D3D9DeviceLock& operator = (D3D9DeviceLock&& other) {
++      if (this == &other) return *this;
+       if (m_mutex)
+         m_mutex->unlock();
+ 
+@@ -62,12 +69,13 @@ namespace dxvk {
+ 
+     D3D9DeviceLock AcquireLock() {
+       return m_protected
+-        ? D3D9DeviceLock(m_mutex)
++        ? D3D9DeviceLock(m_mutex, m_cpuLockingOpt)
+         : D3D9DeviceLock();
+     }
+ 
+   private:
+ 
++    const bool      m_cpuLockingOpt = cpuLockingOptimized();
+     BOOL            m_protected;
+ 
+     sync::RecursiveSpinlock m_mutex;
+diff --git a/src/d3d9/d3d9_state.h b/src/d3d9/d3d9_state.h
+index ad113d1..f3df9f6 100644
+--- a/src/d3d9/d3d9_state.h
++++ b/src/d3d9/d3d9_state.h
+@@ -333,6 +333,32 @@ namespace dxvk {
+       : UpdateHelper(pState->psConsts);
+   }
+ 
++  // Compare effective values, using exactly the same float emulation as the
++  // existing updater. Bit equality preserves signed zero and raw NaN payloads.
++  // Called only after validation/clamping and state-block recording.
++  template<DxsoProgramType ProgramType, D3D9ConstantType ConstantType, typename T, typename StateType>
++  bool StateConstantsUnchanged(StateType* state, UINT start, const T* data, UINT count, bool floatEmu) {
++    auto same = [&](auto& set) {
++      if constexpr (ConstantType == D3D9ConstantType::Float) {
++        if (!floatEmu) return !std::memcmp(set->fConsts[start].data, data, count * sizeof(Vector4));
++        for (UINT i = 0; i < count; ++i) {
++          const auto effective = replaceNaN(data + i * 4);
++          if (std::memcmp(set->fConsts[start + i].data, effective.data, sizeof(Vector4))) return false;
++        }
++        return true;
++      } else if constexpr (ConstantType == D3D9ConstantType::Int) {
++        return !std::memcmp(set->iConsts[start].data, data, count * sizeof(Vector4i));
++      } else {
++        for (UINT i = 0; i < count; ++i) {
++          const UINT index = start + i;
++          if (bool(set->bConsts[index / 32] & (1u << (index % 32))) != bool(data[i])) return false;
++        }
++        return true;
++      }
++    };
++    return ProgramType == DxsoProgramTypes::VertexShader ? same(state->vsConsts) : same(state->psConsts);
++  }
++
+   struct Direct3DState9 : public D3D9DeviceState {
+ 
+     std::array<Com<D3D9Surface, false>, caps::MaxSimultaneousRenderTargets> renderTargets;
+diff --git a/src/d3d9/wizard101_texture_profile.h b/src/d3d9/wizard101_texture_profile.h
+new file mode 100644
+index 0000000..203cd0a
+--- /dev/null
++++ b/src/d3d9/wizard101_texture_profile.h
+@@ -0,0 +1,128 @@
++#pragma once
++#include "wizard101_io_profile.h"
++#include <d3dx9.h>
++namespace dxvk::wizard101 {
++  // Timing only: exactly forward every argument and result, including optional
++  // output pointers and the incoming/outgoing Win32 error. No asset identity.
++  template<typename F, typename... A>
++  HRESULT TimedTextureCall(const char* label, F fn, A... args) {
++    DWORD error = GetLastError(); HRESULT result;
++    { ProfileScope profile(label);
++      SetLastError(error); result = fn(args...); error = GetLastError();
++    }
++    SetLastError(error); return result;
++  }
++  inline decltype(&::D3DXCreateTextureFromFileInMemory) originalD3DXCreateTextureFromFileInMemory = nullptr;
++  inline HRESULT WINAPI TimedD3DXCreateTextureFromFileInMemory(struct IDirect3DDevice9 *device,
++        const void *srcdata, UINT srcdatasize, struct IDirect3DTexture9 **texture) {
++    return TimedTextureCall("game_d3dx_texture_D3DXCreateTextureFromFileInMemory", originalD3DXCreateTextureFromFileInMemory, device, srcdata, srcdatasize, texture);
++  }
++  inline decltype(&::D3DXCreateCubeTextureFromFileInMemory) originalD3DXCreateCubeTextureFromFileInMemory = nullptr;
++  inline HRESULT WINAPI TimedD3DXCreateCubeTextureFromFileInMemory(struct IDirect3DDevice9 *device,
++        const void *srcdata, UINT srcdatasize, struct IDirect3DCubeTexture9 **cube) {
++    return TimedTextureCall("game_d3dx_texture_D3DXCreateCubeTextureFromFileInMemory", originalD3DXCreateCubeTextureFromFileInMemory, device, srcdata, srcdatasize, cube);
++  }
++  inline decltype(&::D3DXCreateVolumeTextureFromFileInMemory) originalD3DXCreateVolumeTextureFromFileInMemory = nullptr;
++  inline HRESULT WINAPI TimedD3DXCreateVolumeTextureFromFileInMemory(struct IDirect3DDevice9 *device,
++        const void *srcdata, UINT srcdatasize, struct IDirect3DVolumeTexture9 **volume) {
++    return TimedTextureCall("game_d3dx_texture_D3DXCreateVolumeTextureFromFileInMemory", originalD3DXCreateVolumeTextureFromFileInMemory, device, srcdata, srcdatasize, volume);
++  }
++  inline decltype(&::D3DXCreateTextureFromFileExA) originalD3DXCreateTextureFromFileExA = nullptr;
++  inline HRESULT WINAPI TimedD3DXCreateTextureFromFileExA(struct IDirect3DDevice9 *device, const char *srcfile,
++        UINT width, UINT height, UINT miplevels, DWORD usage, D3DFORMAT format,
++        D3DPOOL pool, DWORD filter, DWORD mipfilter, D3DCOLOR colorkey, D3DXIMAGE_INFO *srcinfo,
++        PALETTEENTRY *palette, struct IDirect3DTexture9 **texture) {
++    return TimedTextureCall("game_d3dx_texture_D3DXCreateTextureFromFileExA", originalD3DXCreateTextureFromFileExA, device, srcfile, width, height, miplevels, usage, format, pool, filter, mipfilter, colorkey, srcinfo, palette, texture);
++  }
++  inline decltype(&::D3DXCreateCubeTextureFromFileExA) originalD3DXCreateCubeTextureFromFileExA = nullptr;
++  inline HRESULT WINAPI TimedD3DXCreateCubeTextureFromFileExA(struct IDirect3DDevice9 *device, const char *srcfile,
++        UINT size, UINT miplevels, DWORD usage, D3DFORMAT format,
++        D3DPOOL pool, DWORD filter, DWORD mipfilter, D3DCOLOR colorkey, D3DXIMAGE_INFO *srcinfo,
++        PALETTEENTRY *palette, struct IDirect3DCubeTexture9 **cube) {
++    return TimedTextureCall("game_d3dx_texture_D3DXCreateCubeTextureFromFileExA", originalD3DXCreateCubeTextureFromFileExA, device, srcfile, size, miplevels, usage, format, pool, filter, mipfilter, colorkey, srcinfo, palette, cube);
++  }
++  inline decltype(&::D3DXCreateVolumeTextureFromFileExA) originalD3DXCreateVolumeTextureFromFileExA = nullptr;
++  inline HRESULT WINAPI TimedD3DXCreateVolumeTextureFromFileExA(struct IDirect3DDevice9 *device, const char *srcfile,
++        UINT width, UINT height, UINT depth, UINT miplevels, DWORD usage, D3DFORMAT format,
++        D3DPOOL pool, DWORD filter, DWORD mipfilter, D3DCOLOR colorkey, D3DXIMAGE_INFO *srcinfo,
++        PALETTEENTRY *palette, struct IDirect3DVolumeTexture9 **volume) {
++    return TimedTextureCall("game_d3dx_texture_D3DXCreateVolumeTextureFromFileExA", originalD3DXCreateVolumeTextureFromFileExA, device, srcfile, width, height, depth, miplevels, usage, format, pool, filter, mipfilter, colorkey, srcinfo, palette, volume);
++  }
++  inline decltype(&::D3DXCreateTexture) originalD3DXCreateTexture = nullptr;
++  inline HRESULT WINAPI TimedD3DXCreateTexture(struct IDirect3DDevice9 *device, UINT width, UINT height,
++        UINT miplevels, DWORD usage, D3DFORMAT format, D3DPOOL pool, struct IDirect3DTexture9 **texture) {
++    return TimedTextureCall("game_d3dx_texture_D3DXCreateTexture", originalD3DXCreateTexture, device, width, height, miplevels, usage, format, pool, texture);
++  }
++  inline decltype(&::D3DXCreateTextureFromFileInMemoryEx) originalD3DXCreateTextureFromFileInMemoryEx = nullptr;
++  inline HRESULT WINAPI TimedD3DXCreateTextureFromFileInMemoryEx(struct IDirect3DDevice9 *device, const void *srcdata,
++        UINT srcdatasize, UINT width, UINT height, UINT miplevels, DWORD usage, D3DFORMAT format,
++        D3DPOOL pool, DWORD filter, DWORD mipfilter, D3DCOLOR colorkey, D3DXIMAGE_INFO *srcinfo,
++        PALETTEENTRY *palette, struct IDirect3DTexture9 **texture) {
++    return TimedTextureCall("game_d3dx_texture_D3DXCreateTextureFromFileInMemoryEx", originalD3DXCreateTextureFromFileInMemoryEx, device, srcdata, srcdatasize, width, height, miplevels, usage, format, pool, filter, mipfilter, colorkey, srcinfo, palette, texture);
++  }
++  inline void InstallTextureProfileHooks() {
++    if (env::getExeName() != "WizardGraphicalClient.exe" || !profileEnabled()) return;
++    static std::once_flag installed;
++    std::call_once(installed, [] {
++      auto base = reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
++      if (!base) return;
++      auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
++      if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
++      auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
++      if (nt->Signature != IMAGE_NT_SIGNATURE) return;
++      const auto dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
++      if (!dir.VirtualAddress) return;
++      auto imports = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
++      unsigned count = 0;
++      for (; imports->Name; ++imports) {
++        if (_stricmp(reinterpret_cast<const char*>(base + imports->Name), "d3dx9_43.dll")) continue;
++        const auto module = GetModuleHandleA("d3dx9_43.dll");
++        if (!module) continue;
++        auto slots = reinterpret_cast<IMAGE_THUNK_DATA*>(base + imports->FirstThunk);
++        // Wizard101 imports these exports by ordinal. Match the resolved target
++        // against the loaded version's named export, never hardcode ordinals.
++        for (; slots->u1.Function; ++slots) {
++          void* replacement = nullptr;
++          if (slots->u1.Function == reinterpret_cast<ULONG_PTR>(GetProcAddress(module, "D3DXCreateTextureFromFileInMemory"))) {
++            originalD3DXCreateTextureFromFileInMemory = reinterpret_cast<decltype(originalD3DXCreateTextureFromFileInMemory)>(slots->u1.Function);
++            replacement = reinterpret_cast<void*>(&TimedD3DXCreateTextureFromFileInMemory);
++          }
++          if (slots->u1.Function == reinterpret_cast<ULONG_PTR>(GetProcAddress(module, "D3DXCreateCubeTextureFromFileInMemory"))) {
++            originalD3DXCreateCubeTextureFromFileInMemory = reinterpret_cast<decltype(originalD3DXCreateCubeTextureFromFileInMemory)>(slots->u1.Function);
++            replacement = reinterpret_cast<void*>(&TimedD3DXCreateCubeTextureFromFileInMemory);
++          }
++          if (slots->u1.Function == reinterpret_cast<ULONG_PTR>(GetProcAddress(module, "D3DXCreateVolumeTextureFromFileInMemory"))) {
++            originalD3DXCreateVolumeTextureFromFileInMemory = reinterpret_cast<decltype(originalD3DXCreateVolumeTextureFromFileInMemory)>(slots->u1.Function);
++            replacement = reinterpret_cast<void*>(&TimedD3DXCreateVolumeTextureFromFileInMemory);
++          }
++          if (slots->u1.Function == reinterpret_cast<ULONG_PTR>(GetProcAddress(module, "D3DXCreateTextureFromFileExA"))) {
++            originalD3DXCreateTextureFromFileExA = reinterpret_cast<decltype(originalD3DXCreateTextureFromFileExA)>(slots->u1.Function);
++            replacement = reinterpret_cast<void*>(&TimedD3DXCreateTextureFromFileExA);
++          }
++          if (slots->u1.Function == reinterpret_cast<ULONG_PTR>(GetProcAddress(module, "D3DXCreateCubeTextureFromFileExA"))) {
++            originalD3DXCreateCubeTextureFromFileExA = reinterpret_cast<decltype(originalD3DXCreateCubeTextureFromFileExA)>(slots->u1.Function);
++            replacement = reinterpret_cast<void*>(&TimedD3DXCreateCubeTextureFromFileExA);
++          }
++          if (slots->u1.Function == reinterpret_cast<ULONG_PTR>(GetProcAddress(module, "D3DXCreateVolumeTextureFromFileExA"))) {
++            originalD3DXCreateVolumeTextureFromFileExA = reinterpret_cast<decltype(originalD3DXCreateVolumeTextureFromFileExA)>(slots->u1.Function);
++            replacement = reinterpret_cast<void*>(&TimedD3DXCreateVolumeTextureFromFileExA);
++          }
++          if (slots->u1.Function == reinterpret_cast<ULONG_PTR>(GetProcAddress(module, "D3DXCreateTexture"))) {
++            originalD3DXCreateTexture = reinterpret_cast<decltype(originalD3DXCreateTexture)>(slots->u1.Function);
++            replacement = reinterpret_cast<void*>(&TimedD3DXCreateTexture);
++          }
++          if (slots->u1.Function == reinterpret_cast<ULONG_PTR>(GetProcAddress(module, "D3DXCreateTextureFromFileInMemoryEx"))) {
++            originalD3DXCreateTextureFromFileInMemoryEx = reinterpret_cast<decltype(originalD3DXCreateTextureFromFileInMemoryEx)>(slots->u1.Function);
++            replacement = reinterpret_cast<void*>(&TimedD3DXCreateTextureFromFileInMemoryEx);
++          }
++          if (!replacement) continue;
++          DWORD protection, ignored;
++          if (!VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), PAGE_READWRITE, &protection)) continue;
++          InterlockedExchangePointer(reinterpret_cast<void* volatile*>(&slots->u1.Function), replacement);
++          VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), protection, &ignored); ++count;
++        }
++      }
++      Logger::info(str::format("W101 profiling: installed ", count, " game D3DX texture hooks"));
++    });
++  }
++}
+diff --git a/src/util/sync/sync_recursive.h b/src/util/sync/sync_recursive.h
+index 1bb64db..7d614db 100644
+--- a/src/util/sync/sync_recursive.h
++++ b/src/util/sync/sync_recursive.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <atomic>
++#include "../thread.h"
+ 
+ #include "../com/com_include.h"
+ 
+@@ -18,6 +19,17 @@ namespace dxvk::sync {
+ 
+     void lock();
+ 
++    // Only the owning thread reads/writes the recursion counter. Other owners
++    // still acquire with the unchanged CAS and release publication below.
++    bool lockRecursiveFast() {
++      if (m_owner.load(std::memory_order_relaxed) == dxvk::this_thread::get_id()) {
++        ++m_counter;
++        return true;
++      }
++      lock();
++      return false;
++    }
++
+     void unlock();
+ 
+     bool try_lock();
+diff --git a/src/util/util_cpu_opt.h b/src/util/util_cpu_opt.h
+new file mode 100644
+index 0000000..bc7e72f
+--- /dev/null
++++ b/src/util/util_cpu_opt.h
+@@ -0,0 +1,25 @@
++#pragma once
++#include "util_env.h"
++namespace dxvk {
++  enum class CpuOptimization { Off, Constants, Locking, Both };
++  inline CpuOptimization cpuOptimization() {
++    static const auto mode = [] {
++      const auto value = env::getEnvVar("DXVK_W101_CPU_OPT");
++      if (value == "constants") return CpuOptimization::Constants;
++      if (value == "locking") return CpuOptimization::Locking;
++      if (value == "both") return CpuOptimization::Both;
++      return CpuOptimization::Off;
++    }();
++    return mode;
++  }
++  inline const char* cpuOptimizationName() {
++    const char* names[] = { "off", "constants", "locking", "both" };
++    return names[unsigned(cpuOptimization())];
++  }
++  inline bool cpuConstantsOptimized() {
++    return cpuOptimization() == CpuOptimization::Constants || cpuOptimization() == CpuOptimization::Both;
++  }
++  inline bool cpuLockingOptimized() {
++    return cpuOptimization() == CpuOptimization::Locking || cpuOptimization() == CpuOptimization::Both;
++  }
++}
+diff --git a/src/util/util_profile.cpp b/src/util/util_profile.cpp
+index 8f33cc2..1c0adcc 100644
+--- a/src/util/util_profile.cpp
++++ b/src/util/util_profile.cpp
+@@ -1,6 +1,7 @@
+ #include "util_profile.h"
+ #include "util_env.h"
+ #include "thread.h"
++#include "util_cpu_opt.h"
+ #include <atomic>
+ #include <fstream>
+ #include <vector>
+@@ -13,6 +14,14 @@ namespace dxvk {
+   thread_local ProfileIdentity profileIdentity;
+   namespace {
+     using Clock = std::chrono::steady_clock;
++    // Fixed-size, per-thread counter slots avoid a shared atomic hot spot.
++    // Slots live until process exit; overflow is explicit, never silent.
++    struct alignas(64) CounterSlot { std::atomic<uint64_t> values[unsigned(CpuCounter::Count)] {}; };
++    CounterSlot counterSlots[128];
++    std::atomic<unsigned> counterSlotsUsed {0};
++    std::atomic<uint64_t> counterOverflow {0};
++    const char* counterNames[] = { "constant_sets", "constant_unchanged", "constant_uploads", "device_locks", "recursive_fast_locks" };
++
+     enum Category { Presentation, Pipeline, Shader, File, Texture, Submission, Pacing, Other, CategoryCount };
+     const char* categoryNames[] = { "presentation", "pipeline", "shader", "file", "texture", "submission", "pacing", "other" };
+     Category category(const char* n) {
+@@ -52,6 +61,7 @@ namespace dxvk {
+              << "# pipeline_id_scope=same_renderer_state_and_renderpass\n"
+              << "event,thread,start_us,duration_us,pipeline_id,shader_ids,coverage,role\n";
+         syncClock();
++        cpuSample(true);
+         const auto requested = env::getEnvVar("DXVK_W101_PROFILE_SECONDS");
+         try { if (!requested.empty()) seconds = std::max(30, std::min(900, std::stoi(requested))); } catch (...) { }
+         pending.reserve(8192); critical.reserve(8192); presentations.reserve(1024);
+@@ -97,6 +107,24 @@ namespace dxvk {
+       std::atomic<uint64_t> filteredShortEvents {0}, filteredShortFileReads {0};
+       int seconds = 180;
+       bool stop = false, allFileReads = false;
++      void cpuSample(bool initial = false) {
++        FILETIME created, exited, kernel, user;
++        if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return;
++        auto ticks = [](FILETIME value) { return (uint64_t(value.dwHighDateTime) << 32) | value.dwLowDateTime; };
++        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-origin).count();
++        file << "# process_cpu_sample={\"relative_us\":" << us << ",\"cpu_us\":" << (ticks(kernel)+ticks(user))/10
++             << ",\"initial\":" << (initial ? "true" : "false") << "}\n";
++        counters(us);
++      }
++      void counters(int64_t us) {
++        file << "# cpu_counters={\"relative_us\":" << us;
++        for (unsigned c = 0; c < unsigned(CpuCounter::Count); ++c) {
++          uint64_t value = 0;
++          for (auto& slot : counterSlots) value += slot.values[c].load(std::memory_order_relaxed);
++          file << ",\"" << counterNames[c] << "\":" << value;
++        }
++        file << ",\"overflow_calls\":" << counterOverflow.load() << "}\n";
++      }
+       void syncClock() {
+         const auto before = Clock::now();
+         FILETIME time; ::GetSystemTimePreciseAsFileTime(&time);
+@@ -108,6 +136,7 @@ namespace dxvk {
+              << ",\"qpc_ticks\":" << ticks.QuadPart << ",\"qpc_frequency\":" << frequency.QuadPart << "}\n";
+       }
+       void footer() {
++        counters(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-origin).count());
+         uint64_t dropped = 0;
+         for (auto& count : loss) dropped += count.load();
+         file << "# dropped_events=" << dropped << "\n# dropped_presentations=" << loss[Presentation].load()
+@@ -144,7 +173,7 @@ namespace dxvk {
+             file << row; bytes += row.size();
+           }
+           batch.clear(); frames.clear(); important.clear();
+-          if (Clock::now() >= nextSync && !exhausted) { syncClock(); bytes = size_t(file.tellp()); nextSync = Clock::now()+std::chrono::seconds(1); }
++          if (Clock::now() >= nextSync && !exhausted) { syncClock(); cpuSample(); bytes = size_t(file.tellp()); nextSync = Clock::now()+std::chrono::seconds(1); }
+           file.flush();
+           if (!file) { profileState.store(0); return; }
+           if (done) { footer(); file.flush(); return; }
+@@ -177,6 +206,11 @@ namespace dxvk {
+     auto entry = shaderCoverage.find(key);
+     return entry == shaderCoverage.end() ? "unknown" : entry->second;
+   }
++  void profileCountActive(CpuCounter counter) {
++    thread_local const unsigned slot = counterSlotsUsed.fetch_add(1, std::memory_order_relaxed);
++    if (slot < 128) counterSlots[slot].values[unsigned(counter)].fetch_add(1, std::memory_order_relaxed);
++    else counterOverflow.fetch_add(1, std::memory_order_relaxed);
++  }
+   void profileDeviceCreated() { ++devices; }
+   void profileDeviceDestroyed() { if (devices.fetch_sub(1) == 1) recorder().shutdown(); }
+   void profileShutdown() { recorder().shutdown(); }
+diff --git a/src/util/util_profile.h b/src/util/util_profile.h
+index 507a377..b0fc89f 100644
+--- a/src/util/util_profile.h
++++ b/src/util/util_profile.h
+@@ -11,6 +11,11 @@ namespace dxvk {
+     const auto state = profileState.load(std::memory_order_relaxed);
+     return state < 0 ? profileInitialize() : state != 0;
+   }
++  enum class CpuCounter { ConstantSets, ConstantUnchanged, ConstantUploads, DeviceLocks, RecursiveFastLocks, Count };
++  void profileCountActive(CpuCounter counter);
++  inline void profileCount(CpuCounter counter) {
++    if (profileState.load(std::memory_order_relaxed) == 1) profileCountActive(counter);
++  }
+   void profileDeviceCreated();
+   void profileDeviceDestroyed();
+   void profileShutdown();

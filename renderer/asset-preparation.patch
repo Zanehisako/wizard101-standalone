@@ -1,0 +1,57 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -8146,6 +8146,30 @@
+     return D3D_OK;
+   }
+ 
++  void D3D9DeviceEx::PrepareKnownAssets() {
++    const DWORD incoming = GetLastError();
++    if (auto cache = wizard101::assetCache(this)) {
++      try {
++        cache->configure(this);
++        if (wizard101::feature("W101_PREPARE_ASSETS")) {
++          cache->load();
++          cache->prepare(this,
++            [](IDirect3DTexture9* t) { static_cast<D3D9Texture2D*>(t)->AddRefPrivate(); },
++            [](IDirect3DTexture9* t) { static_cast<D3D9Texture2D*>(t)->ReleasePrivate(); });
++          Flush();
++          SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
++          m_dxvkDevice->waitForIdle();
++          cache->markReady();
++          Logger::info(str::format("W101 known assets: prepared=", cache->preparedCount.load(), " upload_complete=1 cutoff=none budget_bytes=", wizard101::assetBytes.load()));
++        }
++      } catch (...) {
++        cache->clear();
++        Logger::warn("W101 known assets unavailable; native paths retained");
++      }
++    }
++    SetLastError(incoming);
++  }
++
+   void D3D9DeviceEx::TrackBufferMappingBufferSequenceNumber(
+         D3D9CommonBuffer* pResource) {
+     uint64_t sequenceNumber = GetCurrentSequenceNumber();
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -976,6 +976,8 @@
+     void ResetState(D3DPRESENT_PARAMETERS* pPresentationParameters);
+     HRESULT ResetSwapChain(D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode);
+ 
++    void PrepareKnownAssets();
++
+     HRESULT InitialReset(D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode);
+ 
+     UINT GetSamplerCount() const {
+diff --git a/src/d3d9/d3d9_interface.cpp b/src/d3d9/d3d9_interface.cpp
+--- a/src/d3d9/d3d9_interface.cpp
++++ b/src/d3d9/d3d9_interface.cpp
+@@ -365,6 +365,7 @@
+         return hr;
+ 
+       *ppReturnedDeviceInterface = ref(device);
++      device->PrepareKnownAssets();
+     }
+     catch (const DxvkError& e) {
+       Logger::err(e.message());

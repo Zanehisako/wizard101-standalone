@@ -1,0 +1,253 @@
+diff --git a/src/d3d9/d3d9_common_texture.h b/src/d3d9/d3d9_common_texture.h
+--- a/src/d3d9/d3d9_common_texture.h
++++ b/src/d3d9/d3d9_common_texture.h
+@@ -72,6 +72,11 @@
+   public:
+     uint32_t m_arrivalWritten=0;
+     bool m_arrivalPartial=false,m_arrivalUploaded=false;
++    // GPU initialization is independent of CPU initialization and cache admission.
++    uint32_t m_arrivalInitPending=0;
++    bool m_arrivalFullOverwrite=false;
++    bool CanDeferSceneInitialization() const;
++    void EnsureGpuInitialized();
+ 
+     D3D9CommonTexture(
+             D3D9DeviceEx*             pDevice,
+@@ -131,8 +136,11 @@
+      * \returns The DXVK image
+      */
+     const Rc<DxvkImage>& GetImage() const {
++      const_cast<D3D9CommonTexture*>(this)->EnsureGpuInitialized();
+       return m_image;
+     }
++    // CPU mapping and view creation do not read or write GPU contents.
++    const Rc<DxvkImage>& PeekImage() const { return m_image; }
+ 
+     /**
+      * \brief Get a copy of the main image, but with a single sample
+diff --git a/src/d3d9/d3d9_common_texture.cpp b/src/d3d9/d3d9_common_texture.cpp
+--- a/src/d3d9/d3d9_common_texture.cpp
++++ b/src/d3d9/d3d9_common_texture.cpp
+@@ -91,6 +91,25 @@
+       CreateBuffer(false);
+   }
+ 
++
++  bool D3D9CommonTexture::CanDeferSceneInitialization() const {
++    if(!m_device->m_sceneTextures || m_desc.Pool!=D3DPOOL_MANAGED || m_desc.Usage
++        || m_type!=D3DRTYPE_TEXTURE || m_desc.ArraySize!=1 || m_desc.Depth!=1
++        || !m_desc.MipLevels || m_desc.MipLevels>15 || m_totalSize>8u*1024u*1024u
++        || m_image==nullptr) return false;
++    switch(m_desc.Format) {
++      case D3D9Format::A8R8G8B8: case D3D9Format::X8R8G8B8:
++      case D3D9Format::R5G6B5: case D3D9Format::A1R5G5B5:
++      case D3D9Format::A4R4G4B4: case D3D9Format::DXT1:
++      case D3D9Format::DXT3: case D3D9Format::DXT5: return true;
++      default: return false;
++    }
++  }
++
++  void D3D9CommonTexture::EnsureGpuInitialized() {
++    if(m_arrivalInitPending && !m_arrivalFullOverwrite)
++      m_device->InitializeSceneTexture(this);
++  }
+ 
+   D3D9CommonTexture::~D3D9CommonTexture() {
+     if (m_size != 0)
+@@ -637,7 +656,7 @@
+                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+ 
+     // Create the underlying image view object
+-    return m_device->GetDXVKDevice()->createImageView(GetImage(), viewInfo);
++    return m_device->GetDXVKDevice()->createImageView(PeekImage(), viewInfo);
+   }
+ 
+ 
+diff --git a/src/d3d9/d3d9_initializer.cpp b/src/d3d9/d3d9_initializer.cpp
+--- a/src/d3d9/d3d9_initializer.cpp
++++ b/src/d3d9/d3d9_initializer.cpp
+@@ -44,8 +44,11 @@
+     if (pTexture->GetMapMode() == D3D9_COMMON_TEXTURE_MAP_MODE_NONE)
+       return;
+ 
+-    if (pTexture->GetImage() != nullptr)
+-      InitDeviceLocalTexture(pTexture);
++    if (pTexture->PeekImage() != nullptr) {
++      if(pTexture->CanDeferSceneInitialization())
++        pTexture->m_arrivalInitPending=(1u<<pTexture->Desc()->MipLevels)-1;
++      else InitDeviceLocalTexture(pTexture);
++    }
+ 
+     if (pTexture->Desc()->Pool != D3DPOOL_DEFAULT)
+       InitHostVisibleTexture(pTexture, pInitialData);
+@@ -101,7 +104,7 @@
+       m_context->initImage(image, subresources, VK_IMAGE_LAYOUT_UNDEFINED);
+     };
+ 
+-    InitImage(pTexture->GetImage());
++    InitImage(pTexture->PeekImage());
+ 
+     FlushImplicit();
+   }
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -4570,7 +4570,7 @@
+ 
+     // Skip readback if we discard is specified. We can only do this for textures that have an associated Vulkan image.
+     // Any other texture might write to the Vulkan staging buffer directly. (GetBackbufferData for example)
+-    needsReadback &= pResource->GetImage() != nullptr || !(Flags & D3DLOCK_DISCARD);
++    needsReadback &= pResource->PeekImage() != nullptr || !(Flags & D3DLOCK_DISCARD);
+     pResource->SetNeedsReadback(Subresource, false);
+ 
+ 
+@@ -6063,13 +6063,46 @@
+   }
+ 
+ 
++  void D3D9DeviceEx::InitializeSceneTexture(D3D9CommonTexture* resource) {
++    const uint32_t pending=resource->m_arrivalInitPending;
++    if(!pending) return;
++    auto image=resource->PeekImage();
++    EmitCs([image,pending](DxvkContext* ctx) {
++      const auto aspect=lookupFormatInfo(image->info().format)->aspectMask;
++      if(pending==((1u<<image->info().mipLevels)-1)) {
++        ctx->initImage(image,{aspect,0,image->info().mipLevels,0,1},VK_IMAGE_LAYOUT_UNDEFINED);
++      } else for(uint32_t mip:bit::BitMask(pending))
++        ctx->initImage(image,{aspect,mip,1,0,1},VK_IMAGE_LAYOUT_UNDEFINED);
++    });
++    resource->m_arrivalInitPending=0;
++  }
++
+   void D3D9DeviceEx::UploadManagedTexture(D3D9CommonTexture* pResource) {
+-    if(m_sceneTextures && ReuseSceneUpload(pResource)) return;
++    bool complete=pResource->m_arrivalInitPending && !pResource->m_arrivalPartial
++      && !pResource->IsAnySubresourceLocked()
++      && pResource->m_arrivalWritten==((1u<<pResource->Desc()->MipLevels)-1);
++    const auto& box=pResource->GetDirtyBox(0);
++    complete=complete && box.Left==0 && box.Top==0 && box.Front==0
++      && box.Right==pResource->Desc()->Width && box.Bottom==pResource->Desc()->Height && box.Back==1;
++    for(uint32_t mip=0;complete && mip<pResource->Desc()->MipLevels;mip++)
++      complete=pResource->NeedsUpload(mip);
++    // Suppress clearing only while queuing a proven complete mip chain. Each
++    // successful command retires its pending mip; exceptions clear uncovered mips.
++    pResource->m_arrivalFullOverwrite=complete;
++    struct Finish {
++      D3D9CommonTexture* texture;
++      ~Finish() { texture->m_arrivalFullOverwrite=false; }
++    } finish{pResource};
++    if(!complete) pResource->EnsureGpuInitialized();
++    if(m_sceneTextures && ReuseSceneUpload(pResource)) {
++      pResource->m_arrivalInitPending=0;return;
++    }
+     for (uint32_t subresource = 0; subresource < pResource->CountSubresources(); subresource++) {
+       if (!pResource->NeedsUpload(subresource))
+         continue;
+ 
+       this->FlushImage(pResource, subresource);
++      pResource->m_arrivalInitPending &= ~(1u<<subresource);
+     }
+ 
+     pResource->ClearDirtyBoxes();
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -980,7 +980,8 @@
+     void PrepareKnownAssets();
+     bool ReuseSceneUpload(D3D9CommonTexture* resource);
+     void PrepareArrivalPipelines();
+-    W101ArrivalInputs* ArrivalInputs() { return m_preparePipelines ? &m_arrivalInputs : nullptr; }
++    void InitializeSceneTexture(D3D9CommonTexture* resource);
++    W101ArrivalInputs* ArrivalInputs() { return &m_arrivalInputs; }
+     bool m_sceneTextures=env::getEnvVar("W101_SCENE_TEXTURES")=="1";
+     bool m_preparePipelines=env::getEnvVar("W101_PREPARE_PIPELINES")=="1";
+     bool m_arrivalPreparing=false,m_arrivalComplete=false;
+diff --git a/src/d3d9/d3d9_shader.cpp b/src/d3d9/d3d9_shader.cpp
+--- a/src/d3d9/d3d9_shader.cpp
++++ b/src/d3d9/d3d9_shader.cpp
+@@ -121,7 +121,6 @@
+ 
+     DxsoAnalysisInfo info = module.analyze();
+     *pLength = info.bytecodeByteLength;
+-    if(auto inputs=pDevice->ArrivalInputs()) inputs->record(ShaderStage==VK_SHADER_STAGE_VERTEX_BIT?1:2,pShaderBytecode,info.bytecodeByteLength);
+ 
+     DxvkShaderKey lookupKey = DxvkShaderKey(
+       ShaderStage,
+@@ -133,6 +132,7 @@
+       auto entry = m_modules.find(lookupKey);
+       if (entry != m_modules.end()) {
+         *pShaderModule = entry->second;
++    if(auto inputs=pDevice->ArrivalInputs()) inputs->record(ShaderStage==VK_SHADER_STAGE_VERTEX_BIT?1:2,pShaderBytecode,info.bytecodeByteLength);
+         return;
+       }
+     }
+@@ -152,9 +152,9 @@
+       auto status = m_modules.insert({ lookupKey, *pShaderModule });
+       if (!status.second) {
+         *pShaderModule = status.first->second;
+-        return;
+       }
+     }
++    if(auto inputs=pDevice->ArrivalInputs()) inputs->record(ShaderStage==VK_SHADER_STAGE_VERTEX_BIT?1:2,pShaderBytecode,info.bytecodeByteLength);
+   }
+ 
+ }
+diff --git a/src/d3d9/d3d9_fixed_function.cpp b/src/d3d9/d3d9_fixed_function.cpp
+--- a/src/d3d9/d3d9_fixed_function.cpp
++++ b/src/d3d9/d3d9_fixed_function.cpp
+@@ -2449,16 +2449,18 @@
+   D3D9FFShader D3D9FFShaderModuleSet::GetShaderModule(
+           D3D9DeviceEx*         pDevice,
+     const D3D9FFShaderKeyVS&    ShaderKey) {
+-    if(auto inputs=pDevice->ArrivalInputs()) inputs->record(3,&ShaderKey,sizeof(ShaderKey));
+     // Use the shader's unique key for the lookup
+     auto entry = m_vsModules.find(ShaderKey);
+-    if (entry != m_vsModules.end())
++    if (entry != m_vsModules.end()) {
++    if(auto inputs=pDevice->ArrivalInputs()) inputs->record(3,&ShaderKey,sizeof(ShaderKey));
+       return entry->second;
++    }
+     
+     D3D9FFShader shader(
+       pDevice, ShaderKey);
+ 
+     m_vsModules.insert({ShaderKey, shader});
++    if(auto inputs=pDevice->ArrivalInputs()) inputs->record(3,&ShaderKey,sizeof(ShaderKey));
+ 
+     return shader;
+   }
+@@ -2467,16 +2469,18 @@
+   D3D9FFShader D3D9FFShaderModuleSet::GetShaderModule(
+           D3D9DeviceEx*         pDevice,
+     const D3D9FFShaderKeyFS&    ShaderKey) {
+-    if(auto inputs=pDevice->ArrivalInputs()) inputs->record(4,&ShaderKey,sizeof(ShaderKey));
+     // Use the shader's unique key for the lookup
+     auto entry = m_fsModules.find(ShaderKey);
+-    if (entry != m_fsModules.end())
++    if (entry != m_fsModules.end()) {
++    if(auto inputs=pDevice->ArrivalInputs()) inputs->record(4,&ShaderKey,sizeof(ShaderKey));
+       return entry->second;
++    }
+     
+     D3D9FFShader shader(
+       pDevice, ShaderKey);
+ 
+     m_fsModules.insert({ShaderKey, shader});
++    if(auto inputs=pDevice->ArrivalInputs()) inputs->record(4,&ShaderKey,sizeof(ShaderKey));
+ 
+     return shader;
+   }
+diff --git a/src/dxvk/dxvk_state_cache.h b/src/dxvk/dxvk_state_cache.h
+--- a/src/dxvk/dxvk_state_cache.h
++++ b/src/dxvk/dxvk_state_cache.h
+@@ -30,8 +30,8 @@
+ 
+   public:
+     void finishArrivalPreparation();
+-    bool m_arrival=env::getEnvVar("W101_PREPARE_PIPELINES")=="1";
+-    bool m_preparationDone=false,m_arrivalDirty=false;
++    bool m_arrival=!env::getEnvVar("W101_ARRIVAL_PATH").empty() && env::getEnvVar("W101_ARRIVAL_KEY").size()==64;
++    bool m_preparationDone=env::getEnvVar("W101_PREPARE_PIPELINES")!="1",m_arrivalDirty=false;
+     std::atomic<uint32_t> m_pending{0};
+     std::unordered_set<DxvkStateCacheKey,DxvkHash,DxvkEq> m_queued;
+     void saveArrivalStates();

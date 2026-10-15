@@ -1,0 +1,234 @@
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -50,7 +50,7 @@
+   class D3D9Query;
+   class D3D9StateBlock;
+   class D3D9FormatHelper;
+-  namespace wizard101 { class PreparationWorkers; }
++  namespace wizard101 { class PreparationWorkers; class DrawLayoutCache; }
+   class D3D9UserDefinedAnnotation;
+ 
+   enum class D3D9DeviceFlag : uint32_t {
+@@ -1259,6 +1259,12 @@
+     D3D9FormatHelper*               m_converter   = nullptr;
+     std::unique_ptr<wizard101::PreparationWorkers> m_assetWorkers;
+ 
++    // Cache access and destruction are serialized with all layout commands.
++    std::unique_ptr<wizard101::DrawLayoutCache> m_drawLayouts;
++    bool m_drawLayoutsEnabled = false;
++    bool m_drawLayoutTest = false, m_drawLayoutCollisions = false, m_drawLayoutAllocationFailure = false;
++    void ClearDrawLayouts();
++
+     D3D9FFShaderModuleSet           m_ffModules;
+     D3D9SWVPEmulator                m_swvpEmulator;
+ 
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -18,6 +18,7 @@
+ #include "d3d9_names.h"
+ #include "d3d9_format_helpers.h"
+ #include "wizard101_asset_preparation.h"
++#include "wizard101_draw_layout_cache.h"
+ 
+ #include "../dxvk/dxvk_adapter.h"
+ #include "../dxvk/dxvk_instance.h"
+@@ -70,6 +71,13 @@
+ 
+     m_initializer      = new D3D9Initializer(m_dxvkDevice);
+     m_converter        = new D3D9FormatHelper(m_dxvkDevice);
++    m_drawLayoutsEnabled = wizard101::feature("W101_DRAW_LAYOUT_CACHE");
++    if (wizard101::feature("W101_PERFORMANCE_TEST")) {
++      const auto test = env::getEnvVar("W101_DRAW_LAYOUT_TEST");
++      m_drawLayoutTest = !test.empty();
++      m_drawLayoutCollisions = test == "collision";
++      m_drawLayoutAllocationFailure = test == "allocation";
++    }
+     wizard101::registerAssetDevice(this);
+     if (wizard101::feature("W101_ASSET_WORKERS", "2")) {
+       try { m_assetWorkers.reset(new wizard101::PreparationWorkers()); }
+@@ -196,6 +204,7 @@
+     }
+     wizard101::unregisterAssetDevice(this);
+     m_assetWorkers.reset();
++    ClearDrawLayouts();
+ 
+     Flush();
+     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+@@ -430,6 +439,7 @@
+   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::Reset(D3DPRESENT_PARAMETERS* pPresentationParameters) {
+     D3D9DeviceLock lock = LockDevice();
+ 
++    ClearDrawLayouts();
+     Logger::info("Device reset");
+     m_deviceLostState = D3D9DeviceLostState::Ok;
+ 
+@@ -3901,6 +3911,7 @@
+           D3DDISPLAYMODEEX*      pFullscreenDisplayMode) {
+     D3D9DeviceLock lock = LockDevice();
+ 
++    ClearDrawLayouts();
+     HRESULT hr = ResetSwapChain(pPresentationParameters, pFullscreenDisplayMode);
+     if (FAILED(hr))
+       return hr;
+@@ -7098,110 +7109,66 @@
+   }
+ 
+ 
++  void D3D9DeviceEx::ClearDrawLayouts() {
++    EmitCs([this] (DxvkContext*) {
++      if (m_drawLayouts && m_drawLayoutTest)
++        Logger::info(str::format("W101 draw layouts: hits=", m_drawLayouts->hits,
++          " misses=", m_drawLayouts->misses, " evictions=", m_drawLayouts->evictions,
++          " failures=", m_drawLayouts->failures, " entries=", m_drawLayouts->entries(),
++          " retained_bytes=", m_drawLayouts->bytes(), " process_bytes=", wizard101::assetBytes.load()));
++      m_drawLayouts.reset();
++    });
++  }
++
+   void D3D9DeviceEx::BindInputLayout() {
+     m_flags.clr(D3D9DeviceFlag::DirtyInputLayout);
+-
+     if (m_state.vertexDecl == nullptr) {
+       EmitCs([&cIaState = m_iaState] (DxvkContext* ctx) {
+         cIaState.streamsUsed = 0;
+         ctx->setInputLayout(0, nullptr, 0, nullptr);
+       });
+-    }
+-    else {
+-      std::array<uint32_t, caps::MaxStreams> streamFreq;
+-
+-      for (uint32_t i = 0; i < caps::MaxStreams; i++)
+-        streamFreq[i] = m_state.streamFreq[i];
+-
+-      Com<D3D9VertexDecl,   false> vertexDecl = m_state.vertexDecl;
+-      Com<D3D9VertexShader, false> vertexShader;
+-
+-      if (UseProgrammableVS())
+-        vertexShader = m_state.vertexShader;
+-
+-      EmitCs([
+-        &cIaState         = m_iaState,
+-        cVertexDecl       = std::move(vertexDecl),
+-        cVertexShader     = std::move(vertexShader),
+-        cStreamsInstanced = m_instancedData,
+-        cStreamFreq       = streamFreq
+-      ] (DxvkContext* ctx) {
+-        cIaState.streamsInstanced = cStreamsInstanced;
+-        cIaState.streamsUsed      = 0;
+-
+-        const auto& elements = cVertexDecl->GetElements();
+-
+-        std::array<DxvkVertexAttribute, 2 * caps::InputRegisterCount> attrList;
+-        std::array<DxvkVertexBinding,   2 * caps::InputRegisterCount> bindList;
+-
+-        uint32_t attrMask = 0;
+-        uint32_t bindMask = 0;
+-
+-        const auto& isgn = cVertexShader != nullptr
+-          ? GetCommonShader(cVertexShader)->GetIsgn()
+-          : GetFixedFunctionIsgn();
+-
+-        for (uint32_t i = 0; i < isgn.elemCount; i++) {
+-          const auto& decl = isgn.elems[i];
+-
+-          DxvkVertexAttribute attrib;
+-          attrib.location = i;
+-          attrib.binding  = NullStreamIdx;
+-          attrib.format   = VK_FORMAT_R32G32B32A32_SFLOAT;
+-          attrib.offset   = 0;
+-
+-          for (const auto& element : elements) {
+-            DxsoSemantic elementSemantic = { static_cast<DxsoUsage>(element.Usage), element.UsageIndex };
+-            if (elementSemantic.usage == DxsoUsage::PositionT)
+-              elementSemantic.usage = DxsoUsage::Position;
+-
+-            if (elementSemantic == decl.semantic) {
+-              attrib.binding = uint32_t(element.Stream);
+-              attrib.format  = DecodeDecltype(D3DDECLTYPE(element.Type));
+-              attrib.offset  = element.Offset;
+-
+-              cIaState.streamsUsed |= 1u << attrib.binding;
+-              break;
+-            }
++      return;
++    }
++    auto streamFreq = m_state.streamFreq;
++    Com<D3D9VertexDecl, false> vertexDecl = m_state.vertexDecl;
++    Com<D3D9VertexShader, false> vertexShader;
++    if (UseProgrammableVS()) vertexShader = m_state.vertexShader;
++    EmitCs([this, &cIaState = m_iaState,
++      cVertexDecl = std::move(vertexDecl), cVertexShader = std::move(vertexShader),
++      cStreamsInstanced = m_instancedData, cStreamFreq = streamFreq
++    ] (DxvkContext* ctx) {
++      const auto& elements = cVertexDecl->GetElements();
++      const auto& isgn = cVertexShader != nullptr
++        ? GetCommonShader(cVertexShader)->GetIsgn() : GetFixedFunctionIsgn();
++      wizard101::DrawLayoutKey key;
++      bool supported = false;
++      if (m_drawLayoutsEnabled) {
++        if (!m_drawLayouts) {
++          try {
++            auto cache = std::make_unique<wizard101::DrawLayoutCache>(m_drawLayoutCollisions, m_drawLayoutAllocationFailure);
++            if (cache->available()) m_drawLayouts = std::move(cache);
++          } catch (...) { }
++        }
++        supported = m_drawLayouts && wizard101::DrawLayoutKey::make(elements, isgn,
++          cStreamFreq, cStreamsInstanced, cVertexShader != nullptr, key);
++        if (supported) {
++          if (const auto* layout = m_drawLayouts->find(key)) {
++            cIaState.streamsInstanced = layout->streamsInstanced;
++            cIaState.streamsUsed = layout->streamsUsed;
++            ctx->setInputLayout(layout->attributeCount, layout->attributes.data(),
++              layout->bindingCount, layout->bindings.data());
++            return;
+           }
+-
+-          attrList[i] = attrib;
+-
+-          DxvkVertexBinding binding;
+-          binding.binding = attrib.binding;
+-          //binding.extent = attrib.offset + lookupFormatInfo(attrib.format)->elementSize;
+-
+-          uint32_t instanceData = cStreamFreq[binding.binding % caps::MaxStreams];
+-          if (instanceData & D3DSTREAMSOURCE_INSTANCEDATA) {
+-            binding.fetchRate = instanceData & 0x7FFFFF; // Remove instance packed-in flags in the data.
+-            binding.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+-          }
+-          else {
+-            binding.fetchRate = 0;
+-            binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+-          }
+-
+-          /*if (bindMask & (1u << binding.binding)) {
+-            bindList.at(binding.binding).extent = std::max(
+-              bindList.at(binding.binding).extent, binding.extent);
+-          } else {*/
+-            bindList.at(binding.binding) = binding;
+-          //}
+-
+-          attrMask |= 1u << i;
+-          bindMask |= 1u << binding.binding;
+         }
+-
+-        // Compact the attribute and binding lists to filter
+-        // out attributes and bindings not used by the shader
+-        uint32_t attrCount = CompactSparseList(attrList.data(), attrMask);
+-        uint32_t bindCount = CompactSparseList(bindList.data(), bindMask);
+-
+-        ctx->setInputLayout(
+-          attrCount, attrList.data(),
+-          bindCount, bindList.data());
+-      });
+-    }
++      }
++      wizard101::DrawLayout layout;
++      wizard101::buildDrawLayout(elements, isgn, cStreamFreq, cStreamsInstanced, layout);
++      cIaState.streamsInstanced = layout.streamsInstanced;
++      cIaState.streamsUsed = layout.streamsUsed;
++      ctx->setInputLayout(layout.attributeCount, layout.attributes.data(),
++        layout.bindingCount, layout.bindings.data());
++      if (supported) m_drawLayouts->publish(key, layout);
++    });
+   }
+ 
+ 

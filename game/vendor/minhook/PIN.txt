@@ -1,0 +1,4 @@
+Upstream: https://github.com/TsudaKageyu/minhook
+Tag: v1.3.4
+Commit: c3fcafdc10146beb5919319d0683e44e3c30d537
+Local hook.c changes: retain owned suspension handles; abort on thread/context failure or elapsed freeze budget; verification-only fault seam.
