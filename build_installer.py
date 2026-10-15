@@ -44,8 +44,8 @@ def build_pkg(app, output, installer_identity=None):
                         '--package', str(component), str(distribution)], check=True, capture_output=True)
         document = ET.parse(distribution); product = document.getroot()
         ET.SubElement(product, 'title').text = 'Wizard101 Standalone — Community Beta'
-        for tag in ('welcome', 'conclusion'):
-            ET.SubElement(product, tag, {'file': 'INSTALL.html', 'mime-type': 'text/html'})
+        for tag, page in [('welcome', 'INSTALL.html'), ('conclusion', 'CONCLUSION.html')]:
+            ET.SubElement(product, tag, {'file': page, 'mime-type': 'text/html'})
         options = product.find('options')
         if options is None:
             options = ET.SubElement(product, 'options')

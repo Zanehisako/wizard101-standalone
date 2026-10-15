@@ -239,7 +239,8 @@ def package(base, output, identity=None, notary_profile=None, live_evidence=None
             installer_audit = inspect_pkg(dmg, hashes)
             if channel == 'community-beta' and dmg.stat().st_size > INSTALLER_BUDGET:
                 raise ValueError('Installer exceeds the 150 MiB budget')
-            shutil.copy2(ROOT / 'installer/INSTALL.html', artifacts / 'INSTALL.html')
+            for page in ['INSTALL.html', 'CONCLUSION.html']:
+                shutil.copy2(ROOT / 'installer' / page, artifacts / page)
         else:
             payload = work / 'Payload'; payload.mkdir()
             shutil.copytree(app, payload / app.name, symlinks=True)
