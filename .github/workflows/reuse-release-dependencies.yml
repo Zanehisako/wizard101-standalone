@@ -1,0 +1,48 @@
+name: Reuse verified release dependency sources
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Existing release containing the unchanged dependency sources
+        required: true
+        type: string
+      destination_tag:
+        description: Draft release receiving the dependency source archive
+        required: true
+        type: string
+      expected_sha256:
+        description: Exact archive digest from the verified source provenance
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-dependencies-${{ inputs.destination_tag }}
+  cancel-in-progress: false
+
+jobs:
+  transfer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_TAG: ${{ inputs.source_tag }}
+      DESTINATION_TAG: ${{ inputs.destination_tag }}
+      EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+    steps:
+      - name: Verify the destination and transfer exact dependency sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_TAG" =~ ^v[0-9A-Za-z._-]+$ ]]
+          [[ "$DESTINATION_TAG" =~ ^v[0-9A-Za-z._-]+$ ]]
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$(gh release view "$DESTINATION_TAG" --json isDraft --jq '.isDraft')" == true ]]
+          archive=Wizard101-Dependency-Sources.tar.gz
+          gh release download "$SOURCE_TAG" --pattern "$archive" --dir "$RUNNER_TEMP"
+          printf '%s  %s\n' "$EXPECTED_SHA256" "$RUNNER_TEMP/$archive" | sha256sum --check --status
+          gh release upload "$DESTINATION_TAG" "$RUNNER_TEMP/$archive"
