@@ -34,6 +34,7 @@ FILES += ['build_metal_archive.py', 'verify_metal_archive.py', 'package_metal_ar
           'ARRIVAL-CANDIDATE.md', 'package_shipping.py', 'rebuild_shipping_wine.py', 'SHIPPING.md']
 FILES += ['reduce_runtime.py', 'build_installer.py', 'publish_beta.py', 'live_checklist.py', 'COMMUNITY-BETA.md', 'BETA-QUALIFICATION.md']
 FILES += ['ACCOUNTS.md', 'account_qualification.py', 'install_account_candidate.py', 'build_account_diagnostic.py']
+FILES += ['SUPPORT.md', '.github/ISSUE_TEMPLATE/config.yml']
 DIRECTORIES += ['installer']
 ALLOWED = {'.swift', '.c', '.h', '.cpp', '.mm', '.metal', '.vert', '.frag', '.comp', '.py', '.md', '.json', '.txt', '.patch', '.S'}
 ALLOWED |= {'.html', '.svg'}
@@ -42,7 +43,10 @@ def export(destination):
     destination = Path(destination).resolve()
     if destination.exists(): raise RuntimeError('Use a new export directory')
     destination.mkdir(parents=True)
-    for name in FILES: shutil.copy2(ROOT / name, destination / name)
+    for name in FILES:
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, target)
     for name in DIRECTORIES:
         for source in sorted((ROOT / name).rglob('*')):
             if not source.is_file() or source.is_symlink() or '__pycache__' in source.parts: continue

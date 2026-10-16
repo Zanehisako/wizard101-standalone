@@ -56,8 +56,10 @@ agent did not independently observe the live checks. `BETA-QUALIFICATION.md` and
 remaining signed-release gates. These passes do not qualify 3.2. Additional testers can use `LIVE-CHECKS.html`
 offline in Safari to save their own results; it does not publish them.
 
-Thank you for trying the beta. Report problems or share feedback through
-[GitHub Issues](https://github.com/Zanehisako/wizard101-standalone/issues).
+Thank you for trying the beta! **[Join our Discord for feedback and help](https://discord.gg/b2KVmJ84P)**
+— our main contact for bug reports, questions and suggestions. Accept the invite
+in your browser or Discord app, then post in the server. For bugs, include the
+app version, your Mac/macOS, **US or Steam**, and what happened.
 
 Unofficial project, not affiliated with KingsIsle. Wine and dependencies retain
 their licenses. The source archives include pinned dependencies and project

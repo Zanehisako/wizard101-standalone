@@ -6,6 +6,11 @@ native launcher installs the game, checks updates and handles sign-in. Its UI
 uses official Wizard101 artwork fetched and cached separately, parchment panels,
 and optional animated effects.
 
+> **[Join our Discord for feedback and help →](https://discord.gg/b2KVmJ84P)**
+>
+> Discord is our main contact for bug reports, questions and suggestions.
+> [How to reach us](#feedback-and-support).
+
 **Latest: [3.2 — experimental Steam community beta](https://github.com/Zanehisako/wizard101-standalone/releases/tag/v3.2-community-beta.1).**
 [Download the complete installer](https://github.com/Zanehisako/wizard101-standalone/releases/download/v3.2-community-beta.1/Wizard101-AppleSilicon-community-beta.pkg),
 then choose **US / Steam**. Both providers share installed content and settings;
@@ -19,6 +24,14 @@ in the [installation guide](COMMUNITY-BETA.md). Keep your previous app for rollb
 The [US-only 3.1 beta](https://github.com/Zanehisako/wizard101-standalone/releases/tag/v3.1-community-beta.1)
 remains available. Developer ID, notarization, additional-Mac/oldest-macOS gameplay
 and a clean retained Arrival rebuild remain [signed-release gates](SHIPPING.md).
+
+## Feedback and support
+
+1. [Join our Discord server](https://discord.gg/b2KVmJ84P).
+2. Accept the invite in your browser or Discord app, then post your feedback or question in the server.
+
+For a bug, include the app version, your Mac/macOS, **US or Steam**, and what
+happened. Reproduction steps and a screenshot help. Thank you for helping improve the project!
 
 ## Choose your setup path
 
