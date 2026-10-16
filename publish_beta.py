@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify final beta artifacts; publish a GitHub prerelease only with live passes."""
+"""Verify beta artifacts and publish qualified or explicitly experimental prereleases."""
 import argparse
 import json
 from pathlib import Path
@@ -82,28 +82,35 @@ def draft(directory, repo, tag, target):
                     '--notes-file', str(directory / 'COMMUNITY-BETA.md'), *map(str, release_assets(directory))], check=True)
 
 
-def publish(directory, evidence, repo, tag, target):
+def publish(directory, evidence, repo, tag, target, experimental=False):
     directory = Path(directory).resolve()
-    report = verify(directory, evidence)
+    report = verify(directory, evidence, require_live=not experimental)
     releases = json.loads(subprocess.check_output(['gh', 'release', 'list', '--repo', repo,
                           '--json', 'tagName,isDraft', '--limit', '100'], text=True))
     existing = next((release for release in releases if release['tagName'] == tag), None)
     if existing and existing['isDraft'] is not True: raise ValueError('Refusing to overwrite a public release')
-    report.update(community_beta_ready=True, beta_pending_gates=[], live_evidence_verified=True, blocked_on=[])
+    if experimental:
+        if report.get('community_beta_ready') is not False or report.get('live_evidence_verified') is not False:
+            raise ValueError('Experimental publication must retain pending live qualification')
+        report['experimental_release'] = True
+    else:
+        report.update(community_beta_ready=True, beta_pending_gates=[], account_qualification_pending=[], live_evidence_verified=True, blocked_on=[])
+    title = ('Wizard101 Standalone 3.2 — Experimental Steam Beta' if experimental
+             else 'Wizard101 Standalone — Community Beta')
     (directory / 'RELEASE-STATUS.json').write_text(json.dumps(report, indent=2) + '\n')
     files = sorted(p for p in directory.iterdir() if p.is_file() and p.name != 'SHA256SUMS.txt')
     (directory / 'SHA256SUMS.txt').write_text(''.join(sha(p) + '  ' + p.name + '\n' for p in files))
     # A failed upload leaves a draft, never a partially uploaded public release.
     if not existing:
         subprocess.run(['gh', 'release', 'create', tag, '--repo', repo, '--target', target,
-                    '--draft', '--prerelease', '--title', 'Wizard101 Standalone — Community Beta',
+                    '--draft', '--prerelease', '--title', title,
                     '--notes-file', str(directory / 'COMMUNITY-BETA.md'),
                     *map(str, files), str(directory / 'SHA256SUMS.txt')], check=True)
     else:
         subprocess.run(['gh', 'release', 'upload', tag, '--repo', repo, '--clobber',
                         *map(str, release_assets(directory))], check=True)
     subprocess.run(['gh', 'release', 'edit', tag, '--repo', repo, '--draft=false', '--prerelease',
-                    '--title', 'Wizard101 Standalone — Community Beta',
+                    '--title', title,
                     '--notes-file', str(directory / 'COMMUNITY-BETA.md')], check=True)
 
 
@@ -113,15 +120,19 @@ if __name__ == '__main__':
     parser.add_argument('--live-evidence', type=Path)
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument('--publish', action='store_true', help='Publish after live qualification; otherwise verify only')
+    actions.add_argument('--publish-experimental', action='store_true', help='Publish an experimental prerelease, retaining pending live gates')
     actions.add_argument('--draft', action='store_true', help='Upload a private draft after artifact checks; never publish')
     parser.add_argument('--repo')
     parser.add_argument('--tag')
     parser.add_argument('--target', help='Existing GitHub commit or branch containing the corresponding sources')
     args = parser.parse_args()
-    if args.publish or args.draft:
-        if not all((args.repo, args.tag, args.target)): parser.error('--publish requires --repo, --tag and --target')
+    if args.publish or args.publish_experimental or args.draft:
+        if not all((args.repo, args.tag, args.target)): parser.error('Publication requires --repo, --tag and --target')
     if args.draft:
         draft(args.artifacts, args.repo, args.tag, args.target)
+    elif args.publish_experimental:
+        if args.live_evidence: parser.error('--publish-experimental does not accept live qualification evidence')
+        publish(args.artifacts, None, args.repo, args.tag, args.target, experimental=True)
     elif args.publish:
         if not args.live_evidence: parser.error('--publish requires --live-evidence')
         evidence = json.loads(args.live_evidence.read_text())

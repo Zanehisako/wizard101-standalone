@@ -21,6 +21,7 @@ from build_app import build, launcher_inputs
 from export_clean import export
 from build_installer import APP_NAME, build_pkg, inspect_pkg
 from reduce_runtime import reduce, installed_bytes, APP_BUDGET, INSTALLER_BUDGET
+from account_qualification import ACCOUNT_GATES, write_account_checks
 
 ROOT = Path(__file__).resolve().parent
 MAGICS = {b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'}
@@ -29,6 +30,7 @@ BETA_LIVE_GATES = ['native_login', 'character_selection', 'updates', 'audio', 'k
                    'fresh_install_gameplay', 'session_survives_launcher_exit', 'installer_install',
                    'installer_reinstall', 'rosetta_first_run', 'multiple_installations',
                    'gui_cancel_resume', 'network_interruption', 'insufficient_storage']
+BETA_LIVE_GATES += ACCOUNT_GATES
 
 def sha(path):
     digest = hashlib.sha256()
@@ -94,7 +96,7 @@ def sign(app, identity):
 def validate_live(evidence, hashes):
     required = ['fresh_install_gameplay', 'native_login', 'character_selection', 'session_survives_launcher_exit',
                 'audio', 'keyboard_mouse', 'cursor', 'fullscreen', 'graphics', 'updates', 'gui_cancel_resume',
-                'performance_accepted', 'rosetta_first_run', 'second_apple_silicon_mac', 'oldest_supported_macos', 'clean_source_rebuild']
+                'performance_accepted', 'rosetta_first_run', 'second_apple_silicon_mac', 'oldest_supported_macos', 'clean_source_rebuild'] + ACCOUNT_GATES
     if evidence.get('components') != hashes: raise ValueError('Live evidence must match the final signed app exactly')
     missing = [name for name in required if evidence.get('gates', {}).get(name) is not True]
     if missing: raise ValueError('Unverified public release gates: ' + ', '.join(missing))
@@ -131,15 +133,16 @@ def stage_app(base, launcher, output, wine_fix=None, standalone=False):
     (resources / 'Renderer/ARRIVAL-CANDIDATE.md').unlink(missing_ok=True)
     info = plistlib.loads((output / 'Contents/Info.plist').read_bytes())
     info.update(CFBundleName='Wizard101', CFBundleDisplayName='Wizard101',
-                CFBundleIdentifier='org.wizard101native.mac', CFBundleShortVersionString='3.1',
-                CFBundleVersion='4', CFBundleIconFile='Wizard101.icns', W101DefaultDataDirectory='Wizard101 Native',
+                CFBundleIdentifier='org.wizard101native.mac', CFBundleShortVersionString='3.2',
+                CFBundleVersion='8', CFBundleIconFile='Wizard101.icns', W101DefaultDataDirectory='Wizard101 Native',
                 W101CaptureTiming=False)
     info.pop('W101DataRoot', None)
     info.pop('W101PatchRoot', None)
     info.pop('W101DiagnosticCapture', None)
     if standalone:
         info.update(CFBundleName='Wizard101 Standalone', CFBundleDisplayName='Wizard101 Standalone',
-                    CFBundleVersion='5', W101DistributionChannel='community-beta')
+                    CFBundleVersion='8', W101DistributionChannel='community-beta')
+    info.pop('W101AuthenticationDiagnostics', None)
     # Existing proven feature defaults are retained; experimental switches start
     # off in the new preference domain and remain available under Advanced.
     (output / 'Contents/Info.plist').write_bytes(plistlib.dumps(info, sort_keys=False))
@@ -227,8 +230,9 @@ def package(base, output, identity=None, notary_profile=None, live_evidence=None
             subprocess.run(['xcrun', 'stapler', 'validate', str(app)], check=True)
             subprocess.run(['spctl', '--assess', '--type', 'execute', str(app)], check=True)
         artifacts = work / 'Artifacts'; artifacts.mkdir()
-        shutil.copytree(app, artifacts / app.name, symlinks=True)
-        quickstart = '''Wizard101 for Apple Silicon\n\n1. Drag Wizard101 to Applications.\n2. Open it and choose Install Wizard101.\n3. Sign in with a US standalone account, then Play.\n\nMagical effects can be switched off on the welcome screen.\nGame settings and update tools are under the gear button.\n\nRequires macOS 13+, Apple Silicon, Rosetta and internet.\nThis community launcher is not affiliated with KingsIsle.\n'''
+        # Retain the staged app without allocating a second full runtime copy.
+        app = Path(shutil.move(app, artifacts / app.name))
+        quickstart = '''Wizard101 for Apple Silicon\n\nUS / Steam community beta: Steam remains experimental.\nKeep the previous launcher for rollback.\nSee ACCOUNTS.md for account setup and remaining gameplay checks.\n\n1. Open the app and reuse the existing standalone game.\n2. Choose US or Steam, enter Wizard101 credentials locally, then Play.\n3. For Steam, use the Wizard101 account created through Steam.\n   The Mac Steam client must be installed, signed in and online.\n\nMagical effects can be switched off on the welcome screen.\nGame settings and update tools are under the gear button.\n\nRequires macOS 13+, Apple Silicon, Rosetta and internet.\nThis community launcher is not affiliated with KingsIsle.\n'''
         if not identity: quickstart += '\nTEST CANDIDATE: not notarized. Public shipping is blocked.\n'
         installer_audit = None
         if format == 'pkg':
@@ -259,6 +263,8 @@ def package(base, output, identity=None, notary_profile=None, live_evidence=None
         provenance['base_components'] = original_base
         (artifacts / 'SOURCE-PROVENANCE.json').write_text(json.dumps(provenance, indent=2) + '\n')
         shutil.copy2(ROOT / 'SHIPPING.md', artifacts / 'SHIPPING.md')
+        shutil.copy2(ROOT / 'ACCOUNTS.md', artifacts / 'ACCOUNTS.md')
+        write_account_checks(artifacts, hashes, sha(dmg))
         report = dict(created_at=datetime.now(timezone.utc).isoformat(), public_release_ready=bool(live_evidence and identity),
                       channel=channel, format=format, installed_app_bytes=app_bytes, installer_bytes=dmg.stat().st_size,
                       size_budgets=dict(app_bytes=APP_BUDGET, installer_bytes=INSTALLER_BUDGET),
@@ -267,7 +273,8 @@ def package(base, output, identity=None, notary_profile=None, live_evidence=None
                       developer_id_signed=bool(identity), notarized=bool(identity), self_tests_passed=tests['passed'],
                       bundle_audit=audited, components=hashes, runtime=json.loads((app/'Contents/Resources/Runtime/runtime.json').read_text()),
                       launcher_effects_optional=True, game_assets_bundled=False, live_evidence_verified=bool(live_evidence),
-                      blocked_on=[] if live_evidence else ['live release acceptance', 'second Apple Silicon Mac', 'first Rosetta install', 'clean Arrival source rebuild'] + ([] if identity else ['Developer ID signing', 'Apple notarization']))
+                      account_providers=['us', 'steam'], account_qualification_pending=[] if live_evidence else ACCOUNT_GATES,
+                      blocked_on=[] if live_evidence else ['live release acceptance', 'US / Steam account qualification', 'second Apple Silicon Mac', 'first Rosetta install', 'clean Arrival source rebuild'] + ([] if identity else ['Developer ID signing', 'Apple notarization']))
         if channel == 'community-beta':
             report.update(community_beta_ready=False, beta_pending_gates=BETA_LIVE_GATES,
                           blocked_on=['community beta live qualification'],

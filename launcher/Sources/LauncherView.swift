@@ -90,7 +90,7 @@ struct LauncherView: View {
             ornament.padding(.top, 16).padding(.bottom, 16)
             if model.ready { login } else { setup }
             Spacer(minLength: 16)
-            if model.busy || model.issue != nil || !model.ready {
+            if model.busy || model.lastFailure != nil || !model.ready {
                 VStack(spacing: 8) {
                     if model.busy {
                         if let progress = model.progress { ProgressView(value: progress).tint(ink) }
@@ -98,7 +98,10 @@ struct LauncherView: View {
                     }
                     Text(model.status).font(.system(size: 12, weight: .semibold)).lineLimit(2).multilineTextAlignment(.center)
                     if model.busy { Text(model.detail).font(.system(size: 11)).foregroundColor(ink.opacity(0.65)).lineLimit(2) }
-                    if !model.ready && !model.busy {
+                    if !model.busy, let failure = model.lastFailure {
+                        Text(failure).font(.system(size: 11)).foregroundColor(ink.opacity(0.8)).multilineTextAlignment(.center).lineLimit(4)
+                    }
+                    if !model.ready && !model.busy && model.lastFailure == nil {
                         Text(model.detail).font(.system(size: 11)).foregroundColor(ink.opacity(0.65)).multilineTextAlignment(.center).lineLimit(4)
                     }
                     if model.canCancel { Button("Cancel", action: model.cancel).buttonStyle(.plain).underline().font(.system(size: 11)) }
@@ -109,9 +112,9 @@ struct LauncherView: View {
             }
             ornament.padding(.top, 20).padding(.bottom, 14)
             HStack(spacing: 5) {
-                Text("US accounts").font(.system(size: 10))
+                Text(model.provider == .steam ? "US Steam accounts" : "US accounts").font(.system(size: 10))
                 Text("·")
-                Link("Create an account", destination: URL(string: "https://www.wizard101.com/game")!).font(.system(size: 10)).underline()
+                Link("Create an account", destination: model.provider.registrationURL).font(.system(size: 10)).underline()
             }.foregroundColor(ink.opacity(0.7))
             Text("Community beta · Manual app updates").font(.system(size: 9)).foregroundColor(ink.opacity(0.55)).padding(.top, 8)
         }.padding(.horizontal, 30).padding(.vertical, 26).frame(maxHeight: .infinity)
@@ -123,7 +126,12 @@ struct LauncherView: View {
         .overlay(RoundedRectangle(cornerRadius: 22).stroke(gold.opacity(0.9), lineWidth: 2).allowsHitTesting(false))
     }
     private var login: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("Account type", selection: Binding(get: { model.provider }, set: { model.selectProvider($0) })) {
+                ForEach(AccountProvider.allCases) { provider in Text(provider.title).tag(provider) }
+            }.pickerStyle(.segmented).accessibilityLabel("Account type")
+            Text(model.provider.hint).font(.system(size: 11)).foregroundColor(ink.opacity(0.75))
+                .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 7) {
                 Text("Username").font(.system(size: 12, weight: .semibold))
                 TextField("Enter your username", text: $model.username).textFieldStyle(.plain).font(.system(size: 14)).padding(12)

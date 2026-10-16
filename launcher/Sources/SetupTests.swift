@@ -44,11 +44,11 @@ func runSetupTests(check: (Bool, String) throws -> Void,
     try rejects("Low storage prevents import before staging") { try noSpace.importGame(source) }
     try check(!fm.fileExists(atPath: paths.state.appendingPathComponent("Import").path), "Low storage leaves destination and source intact")
     let token = CancellationToken()
-    let interrupted = FirstRun(paths: paths, token: token, report: { update in if update.fraction != nil { token.cancel() } }, gameplayClosed: {})
+    let interrupted = FirstRun(paths: paths, token: token, report: { update in if update.fraction != nil { token.cancel() } }, gameplayClosed: {}, availableBytes: { UInt64.max })
     try rejects("Import cancellation interrupts an in-flight copy") { try interrupted.importGame(source) }
     try check((try fm.contentsOfDirectory(atPath: paths.game.path)).isEmpty && fm.fileExists(atPath: paths.state.appendingPathComponent("Import/Bin/WizardGraphicalClient.exe").path),
               "Cancelled import retains staged files without activating partial data")
-    let resumed = FirstRun(paths: paths, token: CancellationToken(), report: { _ in }, gameplayClosed: {})
+    let resumed = FirstRun(paths: paths, token: CancellationToken(), report: { _ in }, gameplayClosed: {}, availableBytes: { UInt64.max })
     try rejects("A staged import cannot switch sources") { try resumed.importGame(other) }
     try resumed.importGame(source)
     try check(try Data(contentsOf: paths.game.appendingPathComponent("Bin/preferences.xml")) == original,

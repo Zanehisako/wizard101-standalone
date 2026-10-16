@@ -27,29 +27,38 @@ final class LauncherModel: ObservableObject {
     @Published var optimizations = OptimizationSettings() {
         didSet { if combinedOptimizations { optimizations.save() } }
     }
-    @Published var username = UserDefaults.standard.string(forKey: "username") ?? ""
+    @Published private(set) var provider = AccountPreferences().provider
+    @Published var username = "" {
+        didSet { rememberAccount() }
+    }
     @Published var password = ""
-    @Published var savePassword = UserDefaults.standard.bool(forKey: "savePassword")
+    @Published var savePassword = false {
+        didSet { rememberAccount() }
+    }
     @Published var busy = false
     @Published var canCancel = false
     @Published var status = "Checking your installation…"
     @Published var detail = ""
     @Published var issue: String?
+    @Published private(set) var lastFailure: String?
     @Published var ready = false
     @Published var progress: Double?
     @Published var updateSummary: String?
     let renderer: SpiralRenderer?
     let gpu: String
     private var process: Process?
+    private var launchedSession: GameSession?
     private var timer: Timer?
     private var token: CancellationToken?
     private var operationLock: LauncherLock?
     private var logURL: URL?
     private var scanning = false
-    private let keychain = PasswordStore()
+    private var changingProvider = false
+    private var keychain: PasswordStore { PasswordStore(service: provider.keychainService) }
     var state: URL { paths.state }
     var plan: LaunchPlan {
         var result = LaunchPlan(paths: paths, mode: mode, profile: profile, environment: ProcessInfo.processInfo.environment, warmup: warmup)
+        result.provider = provider
         result.workloadPerformanceEnabled = workloadFixes
         if combinedOptimizations { result.experimentSelections = optimizations.environment }
         return result
@@ -63,6 +72,11 @@ final class LauncherModel: ObservableObject {
            let renderer = try? SpiralRenderer(device: device, shaderURL: shader) {
             self.renderer = renderer; self.gpu = device.name
         } else { self.renderer = nil; self.gpu = "Unavailable" }
+        let accounts = AccountPreferences()
+        changingProvider = true
+        username = accounts.username(for: accounts.provider)
+        savePassword = accounts.remembersPassword(for: accounts.provider)
+        changingProvider = false
         refresh()
         if ready, savePassword, !username.isEmpty { loadPassword() }
     }
@@ -80,9 +94,8 @@ final class LauncherModel: ObservableObject {
             try paths.validateRuntime()
             setupAvailable = true
             try plan.validateInstallation(); ready = true
-            status = "Ready for adventure"
-            detail = ""
-            issue = nil; scan()
+            if lastFailure == nil { status = "Ready for adventure"; detail = ""; issue = nil }
+            scan()
         } catch {
             ready = false
             status = setupAvailable ? "Welcome, wizard!" : "Setup needs attention"
@@ -143,8 +156,26 @@ final class LauncherModel: ObservableObject {
             }
         }
     }
+    private func rememberAccount() {
+        guard !changingProvider else { return }
+        AccountPreferences().save(username: username, remember: savePassword, for: provider)
+    }
+    func selectProvider(_ selected: AccountProvider) {
+        guard !busy, selected != provider else { return }
+        rememberAccount()
+        changingProvider = true
+        password = ""; issue = nil; lastFailure = nil; detail = ""
+        provider = selected
+        let accounts = AccountPreferences()
+        accounts.provider = selected
+        username = accounts.username(for: selected)
+        savePassword = accounts.remembersPassword(for: selected)
+        changingProvider = false
+        if ready { status = "Ready for adventure" }
+        if ready, savePassword, !username.isEmpty { loadPassword() }
+    }
     func loadPassword() {
-        let account = username, keychain = keychain
+        let account = username, keychain = keychain, selectedProvider = provider
         guard !account.isEmpty, !busy else { return }
         busy = true
         DispatchQueue.global(qos: .userInitiated).async {
@@ -152,7 +183,7 @@ final class LauncherModel: ObservableObject {
             DispatchQueue.main.async {
                 self.busy = false
                 switch result {
-                case .success(let value): if self.username == account { self.password = value ?? ""; self.detail = value == nil ? "No password is saved for this account." : "Password loaded from Mac Keychain." }
+                case .success(let value): if self.username == account && self.provider == selectedProvider { self.password = value ?? ""; self.detail = value == nil ? "No password is saved for this account." : "Password loaded from Mac Keychain." }
                 case .failure(let error): self.fail(error.localizedDescription)
                 }
             }
@@ -167,7 +198,7 @@ final class LauncherModel: ObservableObject {
             DispatchQueue.main.async {
                 self.busy = false
                 switch result {
-                case .success: self.password = ""; self.savePassword = false; UserDefaults.standard.set(false, forKey: "savePassword"); self.detail = "Saved password removed from Keychain."
+                case .success: self.password = ""; self.savePassword = false; self.detail = "Saved password removed from Keychain."
                 case .failure(let error): self.fail(error.localizedDescription)
                 }
             }
@@ -179,12 +210,15 @@ final class LauncherModel: ObservableObject {
     func shutdown() { token?.cancel() }
     private func begin(checkOnly: Bool) {
         guard ready, !busy, !scanning else { return }
-        let account = username.trimmingCharacters(in: .whitespacesAndNewlines), secret = password, save = savePassword
+        let account = username.trimmingCharacters(in: .whitespacesAndNewlines), secret = password, save = savePassword, selectedProvider = provider
         var selected = plan
         let directory = state, keychain = keychain
+        let diagnostics = Bundle.main.object(forInfoDictionaryKey: "W101AuthenticationDiagnostics") as? Bool == true
+            ? AuthenticationDiagnostics(url: directory.appendingPathComponent("AuthenticationFailure.json")) : nil
+        try? diagnostics?.clear()
         let token = CancellationToken(); self.token = token
         let patcher = patcher(token: token)
-        busy = true; canCancel = true; progress = nil
+        busy = true; canCancel = true; progress = nil; lastFailure = nil; issue = nil
         if checkOnly { updateSummary = "Checking updates…" }
         status = checkOnly ? "Checking updates…" : "Signing in…"
         detail = checkOnly ? "Looking for new game content." : "Getting your adventure ready."
@@ -200,12 +234,11 @@ final class LauncherModel: ObservableObject {
                     }
                     // Update bootstrap files before any credentials are sent.
                     _ = try patcher.run(apply: true, prepareAppearance: selected.experimentFeatures["W101_PREPARE_APPEARANCE"] == "1")
-                    let auth = NativeAuthentication(base: selected.gameDirectory)
+                    let auth = NativeAuthentication(base: selected.gameDirectory, provider: selectedProvider)
                     var session = try auth.signIn(username: account, password: secret, token: token)
                     if save { try keychain.save(account: account, password: secret) }
                     else { try keychain.remove(account: account) }
-                    UserDefaults.standard.set(account, forKey: "username")
-                    UserDefaults.standard.set(save, forKey: "savePassword")
+                    AccountPreferences().save(username: account, remember: save, for: selectedProvider)
                     DispatchQueue.main.async { self.status = "Verifying session…"; self.detail = "Checking your session with the account server before launch."; self.progress = nil }
                     session = try auth.revalidate(session, token: token)
                     selected.session = session
@@ -220,6 +253,8 @@ final class LauncherModel: ObservableObject {
                     }
                 }
             } catch {
+                let error: Error = token.isCancelled ? CancellationError() : error
+                try? diagnostics?.record(error)
                 DispatchQueue.main.async {
                     self.password = ""; self.token = nil
                     if checkOnly { self.updateSummary = error is CancellationError ? "Update check cancelled." : "Couldn’t check updates." }
@@ -246,7 +281,8 @@ final class LauncherModel: ObservableObject {
             // Wine can echo command arguments on errors. Never retain its output.
             child.standardOutput = FileHandle.nullDevice; child.standardError = FileHandle.nullDevice
             child.terminationHandler = { process in DispatchQueue.main.async { self.finished(process.terminationStatus) } }
-            logURL = logs; process = child; try child.run(); beginMonitoring()
+            logURL = logs; process = child; launchedSession = launchPlan.session
+            try child.run(); beginMonitoring()
         } catch { fail(error.localizedDescription) }
     }
     private func beginMonitoring() {
@@ -282,14 +318,15 @@ final class LauncherModel: ObservableObject {
         }
     }
     private func finished(_ code: Int32) {
-        process = nil; token = nil
+        process = nil; token = nil; launchedSession = nil
         if code != 0 { fail("The game exited with code \(code). Sign in again to retry.") }
         else { status = "Game closed"; detail = "Sign in to play again."; scan() }
     }
     private func fail(_ message: String) {
+        launchedSession = nil
         busy = false; canCancel = false; progress = nil; operationLock = nil
         timer?.invalidate(); timer = nil
-        status = "Needs attention"; detail = message; issue = message
+        status = "Needs attention"; detail = message; lastFailure = message; issue = message
     }
     func openLogs() {
         let directory = logURL ?? paths.prefix.appendingPathComponent("drive_c/NativeLogs")

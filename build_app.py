@@ -34,7 +34,7 @@ def build(output=None, runtime=None, renderer=None, development=False, data_root
         sdk = subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip()
         sources = sorted((ROOT / 'Sources').glob('*.swift'))
         objects = []
-        for source in [ROOT / 'Vendor/Twofish/twofish.c', ROOT / 'Vendor/CryptoBridge.c', ROOT / 'Vendor/GzipBridge.c']:
+        for source in [ROOT / 'Vendor/Twofish/twofish.c', ROOT / 'Vendor/CryptoBridge.c', ROOT / 'Vendor/GzipBridge.c', ROOT / 'Vendor/SteamBridge.c']:
             obj = Path(temp) / (source.stem + '.o')
             subprocess.run(['xcrun', 'clang', '-O2', '-target', f'{platform.machine()}-apple-macosx13.0', '-isysroot', sdk, '-c', str(source), '-o', str(obj)], check=True)
             objects.append(str(obj))
@@ -71,7 +71,7 @@ def build(output=None, runtime=None, renderer=None, development=False, data_root
             'CFBundleIdentifier': 'org.wizard101native.portable',
             'CFBundleExecutable': 'Wizard101Native', 'CFBundlePackageType': 'APPL',
             'CFBundleIconFile': 'Wizard101.icns',
-            'CFBundleShortVersionString': '3.1', 'CFBundleVersion': '4',
+            'CFBundleShortVersionString': '3.2', 'CFBundleVersion': '8',
             'LSMinimumSystemVersion': '13.0', 'NSHighResolutionCapable': True,
             'NSPrincipalClass': 'NSApplication',
             'NSAppTransportSecurity': {'NSExceptionDomains': {'versionak.us.wizard101.com': {'NSExceptionAllowsInsecureHTTPLoads': True, 'NSIncludesSubdomains': False}}},

@@ -6,14 +6,18 @@ native launcher installs the game, checks updates and handles sign-in. Its UI
 uses official Wizard101 artwork fetched and cached separately, parchment panels,
 and optional animated effects.
 
-**Current status: unsigned community beta.** Get the
-[installer and corresponding sources](https://github.com/Zanehisako/wizard101-standalone/releases/tag/v3.1-community-beta.1).
-The project owner confirmed all beta live checks passed on 2026-10-15.
-Automated verification includes 49,369 launcher self-checks, 99 Python tests,
-fresh official game setup and isolated graphics/cursor probes. See the
-[qualification record](BETA-QUALIFICATION.md) for the distinction between
-automated checks and user-reported live results. Apps and game files are generated
-locally. Developer ID signing, notarization, additional-Mac/oldest-macOS gameplay
+**Latest: [3.2 — experimental Steam community beta](https://github.com/Zanehisako/wizard101-standalone/releases/tag/v3.2-community-beta.1).**
+[Download the complete installer](https://github.com/Zanehisako/wizard101-standalone/releases/download/v3.2-community-beta.1/Wizard101-AppleSilicon-community-beta.pkg),
+then choose **US / Steam**. Both providers share installed content and settings;
+saved accounts and Keychain passwords are separate. The owner confirmed Steam
+working locally on 2026-10-16. The complete two-provider gameplay, relaunch and
+ten-minute handoff qualification remains pending. See [account setup](ACCOUNTS.md)
+and [verification details](BETA-QUALIFICATION.md).
+
+This release is **unsigned and not notarized**; follow macOS **Open Anyway**
+in the [installation guide](COMMUNITY-BETA.md). Keep your previous app for rollback.
+The [US-only 3.1 beta](https://github.com/Zanehisako/wizard101-standalone/releases/tag/v3.1-community-beta.1)
+remains available. Developer ID, notarization, additional-Mac/oldest-macOS gameplay
 and a clean retained Arrival rebuild remain [signed-release gates](SHIPPING.md).
 
 ## Choose your setup path
@@ -21,8 +25,8 @@ and a clean retained Arrival rebuild remain [signed-release gates](SHIPPING.md).
 The smaller unsigned installer workflow is documented in
 [Community Beta](COMMUNITY-BETA.md). It installs **Wizard101 Standalone.app**,
 offers detected game imports and guided setup, and requires macOS Open Anyway
-approval. The app is 205.9 MiB and the installer is 36.3 MiB, excluding downloaded
-game content. `public_release_ready` remains false for this unsigned beta.
+approval. The app stays below 350 MiB and the installer below 150 MiB, excluding
+downloaded game content. Exact sizes and hashes accompany each release. `public_release_ready` remains false for this unsigned beta.
 Additional testers can open the release’s `LIVE-CHECKS.html` to record
 observations without Terminal.
 
@@ -41,8 +45,10 @@ observations without Terminal.
   deployment target is audited; live acceptance on macOS 13 is still pending.
 - Rosetta for the bundled x64 runtime. Use the launcher's **Install Rosetta**
   button and Apple's guided prompt if it is absent.
-- A US standalone Wizard101 account. Steam accounts and EU login are not
-  supported. Intel Macs and macOS 28 are not qualified.
+- A US standalone Wizard101 account or US Wizard101 account created through
+  Steam. Steam requires the installed Mac Steam client, signed in and online;
+  see [account setup and pending qualification](ACCOUNTS.md).
+  EU login, Intel Macs and macOS 28 are not qualified.
 - Internet access and several GB free for the app, prefix, staging and game.
   The tested startup download was about 0.9 GB; optional worlds and later
   updates grow the installation. Leave additional space for streamed content.
@@ -64,7 +70,8 @@ not to run a complete app.
    installer dialogs; those components are not needed by this C++ client.
 5. Wait for the username/password form. Select **Cancel** if needed; partial
    downloads remain staged. Reopen the same app and select Install again to retry.
-6. Enter your US standalone username and password, then select **Play**.
+6. Choose **US** or **Steam**, enter that Wizard101 account’s username and
+   password, then select **Play**.
    Command-V and Command-A work in the form. **Remember me** is optional and
    stores the password in Mac Keychain.
 
@@ -100,6 +107,12 @@ configured destination.
 Open the app, sign in, and select **Play**. Required game updates are verified
 and installed before authentication. Optional worlds remain available through
 the game's streaming system. The launcher exits when it hands off to the game.
+
+In 3.2, choose **US** or **Steam** first. Steam uses the
+Wizard101 credentials created through Steam and opens the Mac Steam client when
+needed. Both providers share installed content and settings. Saved usernames,
+Remember me preferences and Keychain passwords are separate. See [ACCOUNTS.md](ACCOUNTS.md)
+before testing or replacing the currently installed beta.
 
 The gear opens Settings:
 
@@ -304,7 +317,7 @@ Verify delivered files with `shasum -a 256 -c SHA256SUMS.txt` from the output fo
 | Bundled runtime is missing | Obtain/build the complete app; a development launcher alone cannot run the game. |
 | Download interrupted or cancelled | Retry setup/Play in the same app and data folder. Partial downloads are kept. Check internet and available storage. |
 | Import rejected | Select the folder with `Bin` and `Data`, close gameplay, and resume using the same source. Do not import into an already configured destination. |
-| Username/password cannot sign in | Confirm this is a US standalone account; Steam/EU authentication is unsupported. Use the official Forgot password link if needed. |
+| Username/password cannot sign in | Choose the correct US / Steam provider. Steam needs Steam-created Wizard101 credentials and the signed-in Mac Steam client, and remains experimental. See [account instructions](ACCOUNTS.md). EU is unsupported. |
 | Unsupported game revision | Use a candidate updated for that client revision. Authentication intentionally stops before credentials are sent; do not bypass validation. |
 | Official launcher or game is already open | Close it before setup or another sign-in/update operation. |
 | Build cannot find SDK or Swift | Install/select full Xcode, open it once, then rerun the `xcrun` checks above. |

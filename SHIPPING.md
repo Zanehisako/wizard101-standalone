@@ -75,6 +75,19 @@ and live evidence before uploading. It creates a draft first and publishes only
 after all assets upload. It excludes the staged app and maintainer debug folder.
 `public_release_ready` stays false even when beta qualification passes.
 
+An explicitly requested experimental prerelease can be uploaded while gameplay
+qualification is pending. It runs the same artifact, installer and source checks,
+but keeps `community_beta_ready: false`, `live_evidence_verified: false` and every
+pending gate. Its title and notes must clearly identify experimental support:
+
+```sh
+python3 publish_beta.py dist/community-beta --publish-experimental \
+  --repo OWNER/REPO --tag v3.2-community-beta.1 --target BETA_SOURCE_COMMIT
+```
+
+This does not qualify gameplay or authorize the gated installed-app replacement.
+Keep the previous release and working local app available for rollback.
+
 For signed PKG builds, use `--format pkg --identity ... --notary-profile ...`
 and a separate `--installer-identity "Developer ID Installer: ..."` certificate.
 The existing signed-app live evidence and notarization gates still apply.
@@ -93,7 +106,10 @@ The existing signed-app live evidence and notarization gates still apply.
 
 The app targets Apple Silicon, macOS 13+, and Rosetta while Apple supports it.
 Apple documents general Rosetta availability through macOS 27; macOS 28 is not
-qualified. Steam and EU accounts are unsupported. Game content is downloaded
+qualified. The 3.2 beta supports US / Steam selection with
+[experimental Steam integration](ACCOUNTS.md) and pending account qualification.
+The previous US-only 3.1 release remains available for rollback. EU accounts
+are unsupported. Game content is downloaded
 from KingsIsle. A complete app needs neither CrossOver nor build tools.
 
 The gear opens Settings. **Magical effects** is saved, honors Reduce Motion,

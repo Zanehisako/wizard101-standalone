@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include "SteamBridge.h"
 #include <stdint.h>
 int w101_twofish_ofb(const uint8_t *key, const uint8_t *iv, const uint8_t *input,
                      size_t length, uint8_t *output);

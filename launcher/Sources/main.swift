@@ -158,6 +158,14 @@ if arguments.contains("--protocol-probe") {
     do { print(try NativeAuthentication(base: paths.game).probe(token: CancellationToken())); exit(0) }
     catch { fputs("\(error.localizedDescription)\n", stderr); exit(2) }
 }
+if arguments.contains("--synthetic-auth-probe") {
+    let token = CancellationToken()
+    signal(SIGINT, SIG_IGN)
+    let cancel = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+    cancel.setEventHandler { token.cancel() }; cancel.resume()
+    do { print(try NativeAuthentication(base: paths.game).syntheticAuthenticationProbe(token: token)); cancel.cancel(); exit(0) }
+    catch { cancel.cancel(); fputs("\(error.localizedDescription)\n", stderr); exit(2) }
+}
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

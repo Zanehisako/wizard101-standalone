@@ -11,7 +11,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from build_installer import component_settings
 from package_shipping import BETA_LIVE_GATES, validate_beta_live, package
-from reduce_runtime import pe_snapshot, verify_preserved, strip_tool
+from reduce_runtime import pe_snapshot, verify_preserved, strip_tool, reduce, sha
 
 
 class BetaGateTests(unittest.TestCase):
@@ -69,6 +69,29 @@ class BinaryPreservationTests(unittest.TestCase):
         self.assertTrue({'.text', '.idata', '.edata', '.pdata', '.xdata', '.reloc'} <= set(original['sections']))
         verify_preserved(original, stripped)
         self.assertLess(self.stripped.stat().st_size, self.original.stat().st_size)
+
+    def test_launcher_repackaging_preserves_recorded_runtime_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = root / 'Candidate.app'
+            runtime = app / 'Contents/Resources/Runtime'
+            runtime.mkdir(parents=True)
+            image = runtime / 'example.dll'; shutil.copy2(self.stripped, image)
+            before = image.read_bytes()
+            relative = image.relative_to(app).as_posix()
+            record = dict(preservation_verified=True, modules_removed=0,
+                          files={relative:dict(original_sha256=sha(self.original), stripped_sha256=sha(image))})
+            (runtime / 'SizeReduction.json').write_text(json.dumps(record))
+            report = reduce(app, root / 'Debug.tar.gz')
+            self.assertEqual(image.read_bytes(), before)
+            self.assertEqual(report['already_reduced_files'], 1)
+            self.assertEqual(report['stripped_files'], 0)
+            self.assertEqual(report['files'], record['files'])
+            record['files'][relative]['stripped_sha256'] = 'changed'
+            (runtime / 'SizeReduction.json').write_text(json.dumps(record))
+            report = reduce(app, root / 'Retry-Debug.tar.gz')
+            self.assertEqual(report['already_reduced_files'], 0)
+            self.assertEqual(report['stripped_files'], 1)
 
     def test_corruption_in_each_load_bearing_section_is_rejected(self):
         original = pe_snapshot(self.original)

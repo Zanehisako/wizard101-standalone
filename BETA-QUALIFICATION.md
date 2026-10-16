@@ -1,4 +1,41 @@
-# Community beta qualification — 2026-10-15
+# Community beta qualification
+
+## 3.2 build 8 — experimental Steam beta, 2026-10-16
+
+The project owner reported “nice it's working” after the local Steam retry and
+requested commit, push and release publication. This records a successful local
+report; it does not establish individual passes for every account/gameplay gate.
+The release is explicitly experimental. `community_beta_ready`,
+`live_evidence_verified` and `public_release_ready` remain false, and the
+unrecorded live checks stay pending in `RELEASE-STATUS.json`.
+
+- Remembered US / Steam selector, provider-isolated credentials and one shared
+  game installation and settings.
+- Steam ticket startup/callback handling and scoped cancellation/cleanup.
+- Typed authentication failures retain only provider, numeric code, response
+  stage and an allowlisted reason category. Arbitrary server text and secrets
+  are excluded from displayed errors and diagnostic output.
+- The local diagnostic candidate passed 50,879 launcher self-checks; 50,882 with
+  the isolated Keychain checks enabled. Normal release apps disable the optional
+  local authentication diagnostic file.
+- All 121 Python tests passed in the release checkout, including Steam bridge,
+  provider isolation and experimental-publication checks.
+- The release build repeats launcher self-checks, bundle/signature audits,
+  extracted installer payload checks, complete source inventory and checksum
+  verification. The accompanying status file contains the final artifact hashes.
+- Existing runtime/renderer bytes and game defaults are retained. The installed
+  working launcher and external game data were not replaced during packaging.
+
+The complete US/Steam character selection, gameplay, relaunch, ten-minute
+continued play after launcher exit, switching and settings/pacing checks remain
+pending as recorded in [ACCOUNTS.md](ACCOUNTS.md). The 3.1 record below is historical
+and does not transfer qualification to changed binaries. Downloaded apps remain
+unsigned and unnotarized; additional-Mac/oldest-macOS and clean Arrival rebuild
+checks are also pending.
+
+---
+
+## 3.1 historical qualification — 2026-10-15
 
 The project owner confirmed **all beta live checks passed** and authorized
 publication on 2026-10-15. `community_beta_ready` is true;

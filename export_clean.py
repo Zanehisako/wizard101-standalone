@@ -33,6 +33,7 @@ FILES += ['build_metal_archive.py', 'verify_metal_archive.py', 'package_metal_ar
           'verify_arrival.py', 'verify_arrival_learning.py', 'verify_arrival_decompression.py', 'verify_arrival_metal.py',
           'ARRIVAL-CANDIDATE.md', 'package_shipping.py', 'rebuild_shipping_wine.py', 'SHIPPING.md']
 FILES += ['reduce_runtime.py', 'build_installer.py', 'publish_beta.py', 'live_checklist.py', 'COMMUNITY-BETA.md', 'BETA-QUALIFICATION.md']
+FILES += ['ACCOUNTS.md', 'account_qualification.py', 'install_account_candidate.py', 'build_account_diagnostic.py']
 DIRECTORIES += ['installer']
 ALLOWED = {'.swift', '.c', '.h', '.cpp', '.mm', '.metal', '.vert', '.frag', '.comp', '.py', '.md', '.json', '.txt', '.patch', '.S'}
 ALLOWED |= {'.html', '.svg'}

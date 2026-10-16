@@ -1,6 +1,7 @@
 """Create an offline, hash-bound walkthrough sheet for the actual beta installer."""
 import json
 from pathlib import Path
+from account_qualification import ACCOUNT_CHECKS
 
 
 CHECKS = {
@@ -24,6 +25,7 @@ CHECKS = {
     'graphics': ('Preserve existing graphics', 'Confirm the previous resolution and graphics settings, including 2560×1600 where used. Inspect text, HUD, effects and world rendering.'),
     'performance_accepted': ('Accept frame pacing in real play', 'Compare with the retained Standalone Candidate at the same graphics and 60 FPS settings. Check cold entry, revisit, crowded Commons, arrivals, movement and combat. Record your acceptance or observed regression.'),
 }
+CHECKS.update(ACCOUNT_CHECKS)
 
 
 def write_checklist(destination, evidence):

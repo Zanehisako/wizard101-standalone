@@ -13,6 +13,7 @@ struct LaunchPlan: Sendable {
     let environment: [String: String]
     var warmup: Bool = false
     var session: GameSession? = nil
+    var provider: AccountProvider = .us
     var renderingCandidate: Bool = Bundle.main.object(forInfoDictionaryKey: "W101RenderingPerformanceCandidate") as? Bool ?? false
     var workloadDiagnostics: Bool = Bundle.main.object(forInfoDictionaryKey: "W101WorkloadDiagnostics") as? Bool ?? false
     var workloadPerformance: Bool = Bundle.main.object(forInfoDictionaryKey: "W101WorkloadPerformanceCandidate") as? Bool ?? false
@@ -77,6 +78,10 @@ struct LaunchPlan: Sendable {
     }
     var childEnvironment: [String: String] {
         var result = paths.environment(environment)
+        // The native client exchanges the Mac Steam ticket for a KingsIsle
+        // session. The Windows child uses that session, without a second Steam
+        // client or the Windows-only -ST initialization path.
+        result.removeValue(forKey: "SteamAppId"); result.removeValue(forKey: "SteamGameId")
         result["DXVK_FRAME_RATE"] = mode == .capped ? "60" : "0"
         result["DXVK_W101_LIMITER"] = "legacy"
         result["DXVK_DIAGNOSTICS"] = "0"
@@ -141,7 +146,11 @@ struct LaunchPlan: Sendable {
     }
     func validate() throws {
         try validateInstallation()
+        try validateSession()
+    }
+    func validateSession() throws {
         guard let session else { throw LauncherError.message("Sign in before starting the game.") }
+        guard session.provider == provider else { throw LauncherError.message("Sign in again with the selected \(provider.title) account type.") }
         try session.validate()
     }
     func prepareLogs() throws -> (URL, [String: String]) {

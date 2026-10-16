@@ -125,8 +125,18 @@ def reduce(app, debug_archive, tool=None):
         raise ValueError('Use a new debugging archive outside the app')
     tool = strip_tool(tool)
     before_size = installed_bytes(app)
+    # Repackaging a launcher-only update must preserve the already qualified
+    # runtime. Binutils strip rewrites PE timestamps/checksums even when it
+    # cannot remove any more data. Reuse only exact recorded stripped images
+    # that also have no remaining debug sections.
+    prior_report = app / 'Contents/Resources/Runtime/SizeReduction.json'
+    prior_files = {}
+    if prior_report.is_file():
+        prior = json.loads(prior_report.read_text())
+        if prior.get('preservation_verified') is True and prior.get('modules_removed') == 0:
+            prior_files = prior.get('files', {})
     manifest = dict(tool_version=subprocess.check_output([tool, '--version'], text=True).strip(),
-                    tool_sha256=sha(tool), originals={}, stripped={}, checked_pe_files=0)
+                    tool_sha256=sha(tool), originals={}, stripped={}, checked_pe_files=0, already_reduced_files=0)
     inventory = {p.relative_to(app).as_posix() for p in app.rglob('*') if p.is_file()}
     with tarfile.open(debug_archive, 'w:gz') as archive, tempfile.TemporaryDirectory(prefix='w101-pe-') as tmp:
         for path in sorted(app.rglob('*')):
@@ -139,6 +149,10 @@ def reduce(app, debug_archive, tool=None):
             if before is None:
                 continue
             manifest['checked_pe_files'] += 1
+            relative = path.relative_to(app).as_posix()
+            if not before['debug_sections'] and prior_files.get(relative, {}).get('stripped_sha256') == sha(path):
+                manifest['already_reduced_files'] += 1
+                continue
             if not before['debug_sections'] and not before['coff_symbols']:
                 continue
             staged = Path(tmp) / path.name
@@ -147,7 +161,6 @@ def reduce(app, debug_archive, tool=None):
             verify_preserved(before, pe_snapshot(staged))
             if staged.stat().st_size > path.stat().st_size:
                 raise ValueError('Stripping increased image size: ' + str(path))
-            relative = path.relative_to(app).as_posix()
             archive.add(path, arcname=relative, recursive=False)
             manifest['originals'][relative] = sha(path)
             manifest['stripped'][relative] = sha(staged)
@@ -167,8 +180,9 @@ def reduce(app, debug_archive, tool=None):
             image.with_suffix('.sha256').write_text(sha(image) + '\n')
     report = dict(before_bytes=before_size, after_bytes=installed_bytes(app),
                   checked_pe_files=manifest['checked_pe_files'], stripped_files=len(manifest['stripped']),
+                  already_reduced_files=manifest['already_reduced_files'],
                   preservation_verified=True, modules_removed=0, debug_archive_sha256=sha(debug_archive),
-                  files={name: dict(original_sha256=digest, stripped_sha256=manifest['stripped'][name])
+                  files=prior_files | {name: dict(original_sha256=digest, stripped_sha256=manifest['stripped'][name])
                          for name, digest in manifest['originals'].items()})
     return report
 

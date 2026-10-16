@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from package_shipping import validate_live, signing_identity
+from account_qualification import ACCOUNT_GATES
 
 class ShippingApprovalTests(unittest.TestCase):
     def evidence(self):
@@ -10,7 +11,7 @@ class ShippingApprovalTests(unittest.TestCase):
                 'gates': dict.fromkeys(['fresh_install_gameplay', 'native_login', 'character_selection',
                     'session_survives_launcher_exit', 'audio', 'keyboard_mouse', 'cursor', 'fullscreen',
                     'graphics', 'updates', 'gui_cancel_resume', 'performance_accepted',
-                    'rosetta_first_run', 'second_apple_silicon_mac', 'oldest_supported_macos', 'clean_source_rebuild'], True)}
+                    'rosetta_first_run', 'second_apple_silicon_mac', 'oldest_supported_macos', 'clean_source_rebuild'] + ACCOUNT_GATES, True)}
 
     def test_build_and_synthetic_passes_cannot_authorize_public_release(self):
         evidence = self.evidence()

@@ -15,6 +15,8 @@ func runSelfTests() throws {
         var rejected = false; do { try body() } catch { rejected = true }; try check(rejected, name)
     }
     try runSetupTests(check: check, rejects: rejects)
+    try runAccountTests(check: check, rejects: rejects)
+    try runAuthenticationTests(check: check, rejects: rejects)
     let presentationSuite = "org.wizard101native.presentation.test." + UUID().uuidString
     let presentationDefaults = UserDefaults(suiteName: presentationSuite)!
     defer { presentationDefaults.removePersistentDomain(forName: presentationSuite) }
@@ -414,7 +416,7 @@ func runSelfTests() throws {
         throw LauncherError.message("Fixture game is running")
     })
     try rejects("Running-game guard blocks fixture import") { try blockedSetup.importGame(importSource) }
-    let setup = FirstRun(paths: importPaths, token: token, report: { _ in }, gameplayClosed: {})
+    let setup = FirstRun(paths: importPaths, token: token, report: { _ in }, gameplayClosed: {}, availableBytes: { UInt64.max })
     try setup.importGame(importSource)
     try check(try Data(contentsOf: importPaths.game.appendingPathComponent("Bin/preferences.xml")) == content, "Import preserves settings")
     try Data("changed clone".utf8).write(to: importPaths.game.appendingPathComponent("Bin/preferences.xml"))
