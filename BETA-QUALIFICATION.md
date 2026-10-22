@@ -1,5 +1,36 @@
 # Community beta qualification
 
+## 3.2 beta 2, build 15 — reliability and content recovery, 2026-10-22
+
+This release packages the build-14 launcher changes in a fresh standalone
+installer. The version is 3.2, build 15; the retained build-8 release and local
+reliability candidates remain available for rollback.
+
+- Bounded authentication exchanges, safe failure messages, cancellation and
+  prefix-scoped game recovery.
+- Bounded-range downloads, retained partial staging and full-CRC transactional
+  installation of completed visual archives.
+- Full visual preload by default, with an explicit one-attempt streaming
+  choice after eligible optional or installed dynamic-archive failures.
+- The final package repeats launcher self-checks, signature/bundle audits,
+  extracted installer payload checks, corresponding-source inventory and
+  checksum verification. Exact results and hashes are in `RELEASE-STATUS.json`.
+
+The owner reported that **Use streaming once** works locally. This is user
+attestation, not independent sign-in, gameplay, graphics or Alt-Tab acceptance.
+The last local content check on 2026-10-21 verified 3,548 of 3,549 selected visual
+archives; Mob2 remained incomplete. That observation is not a claim about a
+new user's downloaded content. No game assets or private reports are bundled.
+
+`community_beta_ready`, `live_evidence_verified` and `public_release_ready`
+remain false. All pending account, reliability and signed-release checks remain
+explicit. Earlier qualification does not transfer to changed binaries. The
+installed working app, downloaded game, settings and separate experiments are
+not replaced during packaging; running the installer replaces only the
+standalone application in Applications.
+
+---
+
 ## 3.2 build 8 — experimental Steam beta, 2026-10-16
 
 The project owner reported “nice it's working” after the local Steam retry and

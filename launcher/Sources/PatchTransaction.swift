@@ -90,7 +90,7 @@ struct PatchInventory {
     let headerBootstraps: Set<String>
     var downloadBytes: UInt64 { needed.reduce(0) { $0 + (headerBootstraps.contains($1.localPath) ? $1.compressedHeaderSize : $1.downloadSize) } }
     static func inspect(records: [PatchRecord], base: URL, cache: ChecksumCache, token: CancellationToken,
-                        requireClosed: () throws -> Void = {}, prepareAppearance: Bool = false, progress: (Int, Int) -> Void = { _, _ in }) throws -> PatchInventory {
+                        requireClosed: () throws -> Void = {}, preparation: ContentPreparation = .startup, progress: (Int, Int) -> Void = { _, _ in }) throws -> PatchInventory {
         let installation = SafeInstallation(base: base), fm = FileManager.default
         var selected: [PatchRecord] = [], needed: [PatchRecord] = []
         var optionalMissing = 0, launcherExcluded = 0, streamedArchives = 0, headerBootstraps = Set<String>()
@@ -99,16 +99,16 @@ struct PatchInventory {
             let file = try installation.file(record.localPath)
             if record.officialLauncher && !record.loginDefinition { launcherExcluded += 1; continue }
             if record.protected && !(record.bootstrapOnly && !fm.fileExists(atPath: file.path)) { continue }
-            if !fm.fileExists(atPath: file.path) && !record.requiredAtStartup && !(prepareAppearance && record.appearanceArchive) { optionalMissing += 1; continue }
+            if !fm.fileExists(atPath: file.path) && !record.requiredAtStartup && !preparation.requiresFullArchive(record) { optionalMissing += 1; continue }
             selected.append(record)
         }
         for (index, record) in selected.enumerated() {
             try token.check()
             if index % 32 == 0 { try requireClosed() }
             let file = try installation.file(record.localPath)
-            if try !fm.fileExists(atPath: file.path) || !cache.valid(file, record: record, token: token, mode: prepareAppearance && record.appearanceArchive ? .fullFile : nil) {
+            if try !fm.fileExists(atPath: file.path) || !cache.valid(file, record: record, token: token, mode: preparation.requiresFullArchive(record) ? .fullFile : nil) {
                 needed.append(record)
-                if record.type == 5 && record.streamedArchive && record.compressedHeaderSize > 0 && !(prepareAppearance && record.appearanceArchive) && !fm.fileExists(atPath: file.path) { headerBootstraps.insert(record.localPath) }
+                if record.type == 5 && record.streamedArchive && record.compressedHeaderSize > 0 && !preparation.requiresFullArchive(record) && !fm.fileExists(atPath: file.path) { headerBootstraps.insert(record.localPath) }
             }
             else if record.streamedArchive { streamedArchives += 1 }
             progress(index + 1, selected.count)
@@ -119,6 +119,29 @@ struct PatchInventory {
 }
 
 struct PatchResult { let manifest: PatchManifest; let inventory: PatchInventory }
+
+struct PatchFileFailure: LocalizedError {
+    let record: PatchRecord
+    let preparation: ContentPreparation
+    let underlying: Error
+    var existingStreamingArchiveVerified = false
+    var allowsStreaming: Bool {
+        guard preparation == .visuals, record.visualArchive else { return false }
+        if record.type == 3, !record.requiredAtStartup, let server = underlying as? HTTPTransfer.ServerFailure {
+            return server.status == 403 || server.status == 404
+        }
+        // Shared startup archives never use this recovery. An existing dynamic
+        // archive must already pass the current manifest's ordinary validation;
+        // the chosen launch also runs all startup checks again before sign-in.
+        let path = record.localPath.lowercased()
+        return record.type == 5 && existingStreamingArchiveVerified
+            && !["data/gamedata/root.wad", "data/gamedata/_shared-worlddata.wad"].contains(path)
+            && (underlying as? HTTPTransfer.NetworkFailure)?.resumable == true
+    }
+    var errorDescription: String? {
+        "Update failed for \(record.localPath): \(underlying.localizedDescription)"
+    }
+}
 
 struct PatchProgress: Sendable {
     let phase: String
@@ -265,8 +288,18 @@ final class NativePatcher: Sendable {
     let base: URL, state: URL
     let token: CancellationToken
     let report: @Sendable (PatchProgress) -> Void
-    init(base: URL, state: URL, token: CancellationToken, report: @escaping @Sendable (PatchProgress) -> Void) {
+    private let manifestLoader: @Sendable (CancellationToken, URL) throws -> PatchManifest
+    private let gameplayClosed: @Sendable () throws -> Void
+    private let availableBytes: @Sendable (URL) throws -> UInt64
+    private let transferConfiguration: URLSessionConfiguration?
+    init(base: URL, state: URL, token: CancellationToken, report: @escaping @Sendable (PatchProgress) -> Void,
+         manifestLoader: @escaping @Sendable (CancellationToken, URL) throws -> PatchManifest = { try PatchManifest.fetch(token: $0, staging: $1) },
+         gameplayClosed: @escaping @Sendable () throws -> Void = { try NativePatcher.requireClosed() },
+         availableBytes: @escaping @Sendable (URL) throws -> UInt64 = { (try FileManager.default.attributesOfFileSystem(forPath: $0.path)[.systemFreeSize] as? NSNumber)?.uint64Value ?? 0 },
+         transferConfiguration: URLSessionConfiguration? = nil) {
         self.base = base; self.state = state; self.token = token; self.report = report
+        self.manifestLoader = manifestLoader; self.gameplayClosed = gameplayClosed
+        self.availableBytes = availableBytes; self.transferConfiguration = transferConfiguration
     }
     static func requireClosed() throws {
         guard try GameActivity.scan() == .idle else { throw LauncherError.message("Close Wizard101 and its official launcher before updating. Your game was left running.") }
@@ -317,7 +350,7 @@ final class NativePatcher: Sendable {
             let wireSize = (try? FileManager.default.attributesOfItem(atPath: wire.path))?[.size] as? NSNumber
             if wireSize?.uint64Value != record.compressedHeaderSize {
                 try HTTPTransfer.download(url: prefix.appendingPathComponent(record.source + ".hdr.gz"), to: wire,
-                                          size: record.compressedHeaderSize, token: token, progress: progress)
+                                          size: record.compressedHeaderSize, token: token, progress: progress, testConfiguration: transferConfiguration)
             }
             let result = w101_gunzip_file(wire.path, header.path, record.headerSize, { context in
                 guard let context else { return 1 }
@@ -331,32 +364,65 @@ final class NativePatcher: Sendable {
         }
         return header
     }
-    func run(apply: Bool, prepareAppearance: Bool = false) throws -> PatchResult {
-        try Self.requireClosed(); try token.check()
+    func run(apply: Bool, preparation: ContentPreparation = .startup, installPreparedVisuals: Bool = false) throws -> PatchResult {
+        guard !installPreparedVisuals || (apply && preparation == .startup) else {
+            throw LauncherError.message("Prepared visuals require a startup update.")
+        }
+        try gameplayClosed(); try token.check()
         try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let transaction = PatchTransaction(base: base, state: state, gameplayClosed: Self.requireClosed)
+        let transaction = PatchTransaction(base: base, state: state, gameplayClosed: gameplayClosed)
         if apply { try transaction.recover() }
         else if FileManager.default.fileExists(atPath: state.appendingPathComponent("transaction.json").path) {
             throw LauncherError.message("An interrupted update needs recovery before checking files.")
         }
         report(PatchProgress(phase: "Checking updates…", detail: "Querying the US Windows patch server.", fraction: nil))
-        let manifest = try PatchManifest.fetch(token: token, staging: state)
+        let manifest = try manifestLoader(token, state)
+        if preparation == .visuals && !manifest.records.contains(where: { $0.visualArchive }) {
+            throw LauncherError.message("The official manifest contains no visual archives. Try again.")
+        }
+        if preparation != .startup { try ContentReadiness(manifest: manifest, preparation: preparation).save(state: state) }
         let cache = ChecksumCache(url: state.appendingPathComponent("checksums.json"))
         let installation = SafeInstallation(base: base)
-        let inventory = try PatchInventory.inspect(records: manifest.records, base: base, cache: cache, token: token, requireClosed: Self.requireClosed, prepareAppearance: prepareAppearance) { index, count in
-            report(PatchProgress(phase: "Checking installed files…", detail: "\(index) of \(count)", fraction: Double(index) / Double(count)))
+        let inventory = try PatchInventory.inspect(records: manifest.records, base: base, cache: cache, token: token, requireClosed: gameplayClosed, preparation: preparation) { index, count in
+            report(PatchProgress(phase: preparation == .visuals ? "Preparing game visuals…" : "Checking installed files…", detail: "Checking file \(index) of \(count)", fraction: Double(index) / Double(count)))
         }
         let needed = inventory.needed
         try cache.save()
+        if preparation != .startup { try ContentReadiness(manifest: manifest, preparation: preparation, inventory: inventory).save(state: state) }
         if !apply {
             report(PatchProgress(phase: "Update check complete", detail: "\(needed.count) files need updates or startup downloads. Revision \(manifest.revision).", fraction: 1))
             return PatchResult(manifest: manifest, inventory: inventory)
         }
-        try token.check(); try Self.requireClosed()
+        try token.check(); try gameplayClosed()
         let total = inventory.downloadBytes
         var counts = [String: UInt64](), failure: Error?, staged: [(PatchRecord, URL)] = []
+        if installPreparedVisuals {
+            let neededPaths = Set(needed.map(\.localPath))
+            let staging = SafeInstallation(base: state)
+            var candidates: [(PatchRecord, URL)] = []
+            for record in manifest.records where record.visualArchive && !neededPaths.contains(record.localPath) {
+                try token.check()
+                let target = try staging.file(Self.stagingName(record))
+                if FileManager.default.fileExists(atPath: target.path) { candidates.append((record, target)) }
+            }
+            for (index, candidate) in candidates.enumerated() {
+                try token.check()
+                if index % 32 == 0 {
+                    try gameplayClosed()
+                    report(PatchProgress(phase: "Checking prepared visuals…", detail: "Checking file \(index + 1) of \(candidates.count)",
+                                         fraction: Double(index) / Double(candidates.count)))
+                }
+                let (record, target) = candidate
+                // Only complete, current-manifest CRC matches are promoted.
+                // Partial and corrupt downloads remain staged and untouched.
+                if Integrity.matches(target, size: record.size, crc: record.crc, token: token) {
+                    staged.append((record, target))
+                }
+            }
+        }
+        let preparedCount = staged.count
         let lock = NSLock(), queue = OperationQueue(); queue.maxConcurrentOperationCount = 3
-        let free = (try FileManager.default.attributesOfFileSystem(forPath: state.path)[.systemFreeSize] as? NSNumber)?.uint64Value ?? 0
+        let free = try availableBytes(state)
         guard Self.hasStagingSpace(needed, state: state, free: free, headerBootstraps: inventory.headerBootstraps, token: token) else { throw LauncherError.message("There is not enough free space to stage this update.") }
         for record in needed {
             queue.addOperation {
@@ -366,8 +432,8 @@ final class NativePatcher: Sendable {
                     let target = self.state.appendingPathComponent(name)
                     let downloadProgress: (UInt64) -> Void = { value in
                         lock.lock(); counts[record.localPath] = value
-                        let count = counts.values.reduce(UInt64(0), +); lock.unlock()
-                        self.report(PatchProgress(phase: "Downloading updates…", detail: "\(ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file))", fraction: total == 0 ? 1 : Double(count) / Double(total)))
+                        let count = counts.values.reduce(UInt64(0), +), verified = staged.count - preparedCount; lock.unlock()
+                        self.report(PatchProgress(phase: preparation == .visuals ? "Preparing game visuals…" : "Downloading updates…", detail: "\(ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)) downloaded · \(verified) of \(needed.count) files verified", fraction: total == 0 ? 1 : Double(count) / Double(total)))
                     }
                     if inventory.headerBootstraps.contains(record.localPath) {
                         if !Integrity.matchesHeader(target, size: record.size, headerSize: record.headerSize, headerCRC: record.headerCRC, token: self.token) {
@@ -384,7 +450,7 @@ final class NativePatcher: Sendable {
                                 let header = try self.archiveHeader(record, prefix: manifest.prefix, target: target, progress: downloadProgress)
                                 try ArchivePrefix.stage(header: header, destination: target, record: record, token: self.token)
                             }
-                            try HTTPTransfer.download(url: source, to: wireTarget, size: record.downloadSize, token: self.token, progress: downloadProgress)
+                            try HTTPTransfer.download(url: source, to: wireTarget, size: record.downloadSize, token: self.token, progress: downloadProgress, testConfiguration: self.transferConfiguration)
                         }
                         if record.type == 4 {
                             let result = w101_gunzip_file(wireTarget.path, target.path, record.size, { context in
@@ -406,7 +472,13 @@ final class NativePatcher: Sendable {
                     lock.lock(); counts[record.localPath] = inventory.headerBootstraps.contains(record.localPath) ? record.compressedHeaderSize : record.downloadSize; staged.append((record, target)); lock.unlock()
                 } catch {
                     lock.lock()
-                    if failure == nil { failure = error is CancellationError ? error : LauncherError.message("Update failed for \(record.localPath): \(error.localizedDescription)") }
+                    if failure == nil {
+                        let existingValid = preparation == .visuals && record.type == 5 && record.visualArchive
+                            && Integrity.matchesHeader(self.base.appendingPathComponent(record.localPath), size: record.size,
+                                                       headerSize: record.headerSize, headerCRC: record.headerCRC, token: self.token)
+                        failure = error is CancellationError ? error : PatchFileFailure(record: record, preparation: preparation,
+                            underlying: error, existingStreamingArchiveVerified: existingValid)
+                    }
                     lock.unlock(); self.token.cancel()
                 }
             }
@@ -417,10 +489,24 @@ final class NativePatcher: Sendable {
         report(PatchProgress(phase: "Installing verified updates…", detail: "Keeping your graphics patch and settings.", fraction: nil))
         staged += try RevisionMetadata.stage(revision: manifest.revision, base: base, state: state, token: token)
         try transaction.commit(staged, token: token, headerBootstraps: inventory.headerBootstraps)
-        for (record, _) in staged { _ = try cache.valid(installation.file(record.localPath), record: record, token: token,
-                                                     mode: inventory.headerBootstraps.contains(record.localPath) ? .archiveHeader : .fullFile) }
+        for (record, _) in staged {
+            guard try cache.valid(installation.file(record.localPath), record: record, token: token,
+                                  mode: inventory.headerBootstraps.contains(record.localPath) ? .archiveHeader : .fullFile) else {
+                throw LauncherError.message("Installed content changed during verification. Retry before signing in.")
+            }
+        }
+        if preparation != .startup {
+            let final = try PatchInventory.inspect(records: manifest.records, base: base, cache: cache, token: token,
+                                                   requireClosed: gameplayClosed, preparation: preparation)
+            try ContentReadiness(manifest: manifest, preparation: preparation, inventory: final).save(state: state)
+            guard final.needed.isEmpty else { throw LauncherError.message("Game content is incomplete. Retry before signing in.") }
+        } else if preparedCount > 0 {
+            let final = try PatchInventory.inspect(records: manifest.records, base: base, cache: cache, token: token,
+                                                   requireClosed: gameplayClosed, preparation: .visuals)
+            try ContentReadiness(manifest: manifest, preparation: .visuals, inventory: final).save(state: state)
+        }
         try cache.save()
-        report(PatchProgress(phase: "Content is ready", detail: manifest.revision, fraction: 1))
+        report(PatchProgress(phase: preparation == .visuals ? "Game visuals are ready" : "Content is ready", detail: manifest.revision, fraction: 1))
         return PatchResult(manifest: manifest, inventory: inventory)
     }
 }

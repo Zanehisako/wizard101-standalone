@@ -126,12 +126,14 @@ struct NativeAuthentication {
     let base: URL
     var provider: AccountProvider = .us
     var steamTickets: SteamTicketSource = .macOS
+    var diagnostics: ReliabilityDiagnostics? = nil
     // Verified against the live signed server offer, complete GCM tags, and an
     // authenticated rejection for a random nonexistent diagnostic identity.
     static let encryptedHandshakeVerified = true
     func signIn(username: String, password: String, token: CancellationToken) throws -> GameSession {
         // No preference, environment variable or diagnostic can authorize a real account.
         guard Self.encryptedHandshakeVerified else { throw LauncherError.message("Encrypted native sign-in is not yet verified. No credentials were sent.") }
+        if let diagnostics { return try diagnostics.measure(provider: provider, stage: .authentication) { try authenticate(username: username, password: password, token: token) } }
         return try authenticate(username: username, password: password, token: token)
     }
     private func authenticate(username: String, password: String, token: CancellationToken) throws -> GameSession {
@@ -145,6 +147,7 @@ struct NativeAuthentication {
             let connection = try KIConnection(host: "login.us.wizard101.com", port: 12000, token: token)
             defer { connection.close() }
             let encrypted = try NativeEncryptedSession(connection: connection, game: base.appendingPathComponent("Bin/WizardGraphicalClient.exe"), token: token)
+            defer { diagnostics?.exchange(encrypted.stats) }
             try encrypted.verifyTransport()
             let offer = encrypted.offer
             var fields = try LoginRequest.authentication(credential: offer.credentialPayload(username: username, password: password),
@@ -178,6 +181,10 @@ struct NativeAuthentication {
         return result
     }
     func revalidate(_ session: GameSession, token: CancellationToken) throws -> GameSession {
+        if let diagnostics { return try diagnostics.measure(provider: provider, stage: .validation) { try validateSession(session, token: token) } }
+        return try validateSession(session, token: token)
+    }
+    private func validateSession(_ session: GameSession, token: CancellationToken) throws -> GameSession {
         try token.check()
         guard session.provider == provider else { throw LauncherError.message("The session belongs to another account type. Sign in again with \(provider.title).") }
         // Ask the server even if the conservative local expiry elapsed while
@@ -188,6 +195,7 @@ struct NativeAuthentication {
         let connection = try KIConnection(host: "login.us.wizard101.com", port: 12000, token: token)
         defer { connection.close() }
         let encrypted = try NativeEncryptedSession(connection: connection, game: base.appendingPathComponent("Bin/WizardGraphicalClient.exe"), token: token)
+        defer { diagnostics?.exchange(encrypted.stats) }
         try encrypted.verifyTransport()
         var fields = try LoginRequest.validation(session: session, provider: provider,
                                                   key: encrypted.offer.validationKey(session.passKey), clientID: clientID())

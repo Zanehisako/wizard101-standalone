@@ -1,6 +1,17 @@
 import Foundation
 import CryptoKit
 
+enum ContentPreparation: String, Codable {
+    case startup, appearance, visuals
+    func requiresFullArchive(_ record: PatchRecord) -> Bool {
+        switch self {
+        case .startup: return false
+        case .appearance: return record.appearanceArchive
+        case .visuals: return record.visualArchive
+        }
+    }
+}
+
 struct PatchRecord: Codable, Equatable {
     let source: String
     let target: String
@@ -54,13 +65,24 @@ struct PatchRecord: Codable, Equatable {
         [3, 5].contains(type) && localPath.lowercased().hasSuffix(".wad")
     }
     var appearanceArchive: Bool {
-        // Exact official GameData groups; no worlds, dialogue, pets or effects.
+        guard gameDataArchive else { return false }
+        let family = archiveFamily
+        return ["equipment", "mob"].contains { prefix in
+            family.hasPrefix(prefix) && family.dropFirst(prefix.count).allSatisfy { $0.isASCII && $0.isNumber }
+        }
+    }
+    private var gameDataArchive: Bool {
         let p = localPath.lowercased()
-        guard streamedArchive, !protected, p.hasPrefix("data/gamedata/"),
-              p.split(separator: "/").count == 3 else { return false }
-        let name = String(p.dropFirst("data/gamedata/".count))
-        return name == "equipment.wad" || name == "mob.wad"
-            || name.hasPrefix("equipment-") || name.hasPrefix("mob-")
+        return [1, 3, 4, 5].contains(type) && p.hasSuffix(".wad") && !protected && !officialLauncher && p.hasPrefix("data/gamedata/")
+            && p.split(separator: "/").count == 3
+    }
+    private var archiveFamily: String {
+        String(URL(fileURLWithPath: localPath.lowercased()).deletingPathExtension().lastPathComponent.split(separator: "-").first ?? "")
+    }
+    var visualArchive: Bool {
+        guard gameDataArchive else { return false }
+        let family = archiveFamily
+        return family != "music" && family != "sound" && !family.hasPrefix("sound_")
     }
     var downloadSize: UInt64 { type == 4 ? headerSize : size }
     var downloadSource: String { source + (type == 4 ? ".gz" : "") }
@@ -226,30 +248,66 @@ struct Integrity {
 
 // Streams response chunks to disk; a cancelled transfer retains its partial file.
 final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate {
-    private struct NetworkFailure: LocalizedError {
+    struct ServerFailure: LocalizedError {
+        let status: Int
+        var errorDescription: String? {
+            if status == 403 || status == 404 {
+                return "The official download server rejected this file request (HTTP \(status)). Your downloaded files are preserved."
+            }
+            return "The official download server returned HTTP \(status). Retry to resume."
+        }
+    }
+    struct NetworkFailure: LocalizedError {
         let code: Int
+        var resumable: Bool { [-1001, -1004, -1005, -1009].contains(code) }
         var errorDescription: String? { "A download was interrupted (network code \(code)). Retry to resume." }
     }
     private let url: URL, destination: URL, expected: UInt64, token: CancellationToken, progress: (UInt64) -> Void
+    private let chunkSize: UInt64, deadline: TimeInterval
     private var written: UInt64 = 0, offset: UInt64 = 0
+    private var rangeEnd: UInt64 = 0, responseEnd: UInt64 = 0
     private var file: FileHandle?
     private var error: Error?
     private let completed = DispatchSemaphore(value: 0)
     private var accepted = false
     var testConfiguration: URLSessionConfiguration?
     private var routeAddress: String?
-    init(url: URL, destination: URL, size: UInt64, token: CancellationToken, progress: @escaping (UInt64) -> Void) {
+    init(url: URL, destination: URL, size: UInt64, token: CancellationToken, chunkSize: UInt64,
+         deadline: TimeInterval, progress: @escaping (UInt64) -> Void) {
         self.url = url; self.destination = destination; self.expected = size; self.token = token; self.progress = progress
+        self.chunkSize = chunkSize; self.deadline = deadline
     }
     static func download(url: URL, to: URL, size: UInt64, token: CancellationToken, progress: @escaping (UInt64) -> Void,
                          testConfiguration: URLSessionConfiguration? = nil,
-                         testRoutes: ((CancellationToken) throws -> [String])? = nil) throws {
+                         testRoutes: ((CancellationToken) throws -> [String])? = nil,
+                         testChunkSize: UInt64? = nil) throws {
+        let chunkSize = testChunkSize ?? 8 * 1024 * 1024
+        guard size > 0, chunkSize > 0, chunkSize <= 8 * 1024 * 1024 else {
+            throw LauncherError.message("Invalid download size.")
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + 3600
+        // Explicit, bounded ranges avoid long CDN responses dropping partway
+        // through a WAD. Each completed range preserves progress; every range
+        // has bounded retries and all ranges share a one-hour deadline.
+        while true {
+            try token.check()
+            guard ProcessInfo.processInfo.systemUptime < deadline else { throw NetworkFailure(code: -1001) }
+            if try downloadRange(url: url, to: to, size: size, token: token, progress: progress,
+                                 testConfiguration: testConfiguration, testRoutes: testRoutes,
+                                 chunkSize: chunkSize, deadline: deadline) { return }
+        }
+    }
+    private static func downloadRange(url: URL, to: URL, size: UInt64, token: CancellationToken,
+                                      progress: @escaping (UInt64) -> Void, testConfiguration: URLSessionConfiguration?,
+                                      testRoutes: ((CancellationToken) throws -> [String])?,
+                                      chunkSize: UInt64, deadline: TimeInterval) throws -> Bool {
         var lastFailure: NetworkFailure?
         for attempt in 0..<3 {
             try token.check()
-            let transfer = HTTPTransfer(url: url, destination: to, size: size, token: token, progress: progress)
+            let transfer = HTTPTransfer(url: url, destination: to, size: size, token: token,
+                                        chunkSize: chunkSize, deadline: deadline, progress: progress)
             transfer.testConfiguration = testConfiguration
-            do { try transfer.run(); return }
+            do { try transfer.run(); return transfer.written == size }
             catch let failure as NetworkFailure where [-1001, -1004, -1005, -1009].contains(failure.code) {
                 lastFailure = failure
                 // Resume only transient network failures. Invalid paths, ranges,
@@ -259,7 +317,7 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
                 }
             }
         }
-        guard var lastFailure else { return }
+        guard var lastFailure else { throw LauncherError.message("The download could not be completed.") }
         // Preserve proxy/security routing. A failing CDN edge can be replaced
         // only for this public official HTTP request, never system-wide.
         guard testRoutes != nil || (testConfiguration == nil && CDNRoute.available(url)) else { throw lastFailure }
@@ -276,14 +334,16 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
             guard CDNRoute.publicIPv4(address) else { throw LauncherError.message("Invalid alternate download route.") }
             attempted.insert(address)
             if testRoutes == nil && !CDNRoute.available(url) { throw lastFailure }
-            let transfer = HTTPTransfer(url: url, destination: to, size: size, token: token, progress: progress)
+            let transfer = HTTPTransfer(url: url, destination: to, size: size, token: token,
+                                        chunkSize: chunkSize, deadline: deadline, progress: progress)
             transfer.testConfiguration = testConfiguration; transfer.routeAddress = address
-            do { try transfer.run(); return }
+            do { try transfer.run(); return transfer.written == size }
             catch let failure as NetworkFailure where [-1001, -1004, -1005, -1009].contains(failure.code) { lastFailure = failure }
         }
         throw lastFailure
     }
     private func run() throws {
+        guard ProcessInfo.processInfo.systemUptime < deadline else { throw NetworkFailure(code: -1001) }
         let fm = FileManager.default
         if let attributes = try? fm.attributesOfItem(atPath: destination.path) {
             guard attributes[.type] as? FileAttributeType == .typeRegular else { throw LauncherError.message("Unsafe staged download path.") }
@@ -296,9 +356,12 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
         file = try FileHandle(forWritingTo: destination)
         defer { try? file?.close() }
         if offset >= expected { try file?.truncate(atOffset: 0); offset = 0 }
+        rangeEnd = offset + min(chunkSize, expected - offset) - 1
+        responseEnd = rangeEnd
         written = offset; try file?.seek(toOffset: offset)
         let config = testConfiguration?.copy() as? URLSessionConfiguration ?? URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 30; config.timeoutIntervalForResource = 3600
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = max(0.1, deadline - ProcessInfo.processInfo.systemUptime)
         config.httpMaximumConnectionsPerHost = 3; config.urlCache = nil; config.httpCookieStorage = nil
         if let routeAddress {
             config.urlCredentialStorage = nil
@@ -310,31 +373,36 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
         var request = URLRequest(url: url)
         request.setValue("Wizard101-Native/2", forHTTPHeaderField: "User-Agent")
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        if offset > 0 { request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
+        request.setValue("bytes=\(offset)-\(rangeEnd)", forHTTPHeaderField: "Range")
         let task = session.dataTask(with: request); task.resume()
         while completed.wait(timeout: .now() + 0.1) == .timedOut {
             if token.isCancelled { task.cancel() }
+            if ProcessInfo.processInfo.systemUptime >= deadline { task.cancel() }
         }
         try token.check()
+        guard ProcessInfo.processInfo.systemUptime < deadline else { throw NetworkFailure(code: -1001) }
         if let error { throw error }
-        guard accepted, written == expected else { throw LauncherError.message("A download was interrupted or has the wrong size. Retry to resume.") }
+        guard accepted else { throw LauncherError.message("The download server returned no accepted response.") }
+        guard written == responseEnd + 1 else { throw NetworkFailure(code: -1005) }
         try file?.synchronize()
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         do {
-            guard let http = response as? HTTPURLResponse, [200,206].contains(http.statusCode),
+            guard let http = response as? HTTPURLResponse,
                   let responseURL = response.url, try PatchManifest.safeURL(responseURL.absoluteString) == responseURL else {
-                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                throw LauncherError.message("The official download server returned HTTP \(status). Retry to resume.")
+                throw LauncherError.message("The download server returned an unsupported response.")
             }
+            guard [200,206].contains(http.statusCode) else { throw ServerFailure(status: http.statusCode) }
             if http.statusCode == 206 {
                 let value = http.value(forHTTPHeaderField: "Content-Range") ?? ""
                 let parts = value.replacingOccurrences(of: "bytes ", with: "").split(whereSeparator: { $0 == "-" || $0 == "/" })
                 guard expected > 0, parts.count == 3, UInt64(parts[0]) == offset, UInt64(parts[2]) == expected,
-                      UInt64(parts[1]) == expected - 1 else { throw LauncherError.message("Invalid resumed download response.") }
-            } else if offset > 0 {
-                try file?.truncate(atOffset: 0); try file?.seek(toOffset: 0); written = 0
+                      UInt64(parts[1]) == rangeEnd else { throw LauncherError.message("Invalid resumed download response.") }
+            } else {
+                // A server may ignore Range and return the complete file.
+                responseEnd = expected - 1
+                if offset > 0 { try file?.truncate(atOffset: 0); try file?.seek(toOffset: 0); written = 0 }
             }
             accepted = true; progress(written); completionHandler(.allow)
         } catch { self.error = error; completionHandler(.cancel) }
@@ -342,7 +410,8 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         do {
             try token.check()
-            guard accepted, UInt64(data.count) <= expected - min(written, expected) else { throw LauncherError.message("A download exceeds its declared size.") }
+            let limit = responseEnd + 1
+            guard accepted, written <= limit, UInt64(data.count) <= limit - written else { throw LauncherError.message("A download exceeds its declared size.") }
             try file?.write(contentsOf: data); written += UInt64(data.count); progress(written)
         } catch { self.error = error; dataTask.cancel() }
     }

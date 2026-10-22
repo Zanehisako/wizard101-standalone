@@ -11,13 +11,19 @@ and optional animated effects.
 > Discord is our main contact for bug reports, questions and suggestions.
 > [How to reach us](#feedback-and-support).
 
-**Latest: [3.2 — experimental Steam community beta](https://github.com/Zanehisako/wizard101-standalone/releases/tag/v3.2-community-beta.1).**
-[Download the complete installer](https://github.com/Zanehisako/wizard101-standalone/releases/download/v3.2-community-beta.1/Wizard101-AppleSilicon-community-beta.pkg),
+**Latest: [3.2 beta 2 — sign-in and content recovery](https://github.com/Zanehisako/wizard101-standalone/releases/tag/v3.2-community-beta.2).**
+[Download the complete installer](https://github.com/Zanehisako/wizard101-standalone/releases/download/v3.2-community-beta.2/Wizard101-AppleSilicon-community-beta.pkg),
 then choose **US / Steam**. Both providers share installed content and settings;
 saved accounts and Keychain passwords are separate. The owner confirmed Steam
 working locally on 2026-10-16. The complete two-provider gameplay, relaunch and
 ten-minute handoff qualification remains pending. See [account setup](ACCOUNTS.md)
 and [verification details](BETA-QUALIFICATION.md).
+
+Build 15 adds bounded sign-in, resumable visual downloads and verified content
+recovery. Before Play, the launcher attempts full visual preload. After an
+eligible download failure, **Use streaming once** continues for that attempt;
+the next Play returns to full preload. Streaming does not mark visual readiness
+complete or establish that missing graphics are fixed.
 
 This release is **unsigned and not notarized**; follow macOS **Open Anyway**
 in the [installation guide](COMMUNITY-BETA.md). Keep your previous app for rollback.
@@ -62,9 +68,10 @@ observations without Terminal.
   Steam. Steam requires the installed Mac Steam client, signed in and online;
   see [account setup and pending qualification](ACCOUNTS.md).
   EU login, Intel Macs and macOS 28 are not qualified.
-- Internet access and several GB free for the app, prefix, staging and game.
-  The tested startup download was about 0.9 GB; optional worlds and later
-  updates grow the installation. Leave additional space for streamed content.
+- Internet access and free storage for the app, prefix, game and resumable staging.
+  The launcher calculates the current space needed for full visual preload.
+  A small startup download is not the complete visual installation; allow space
+  for additional game content and updates.
 
 See [Apple's Rosetta documentation](https://support.apple.com/en-us/102527).
 Full Xcode, Homebrew and compilers are needed only to build or verify source,
@@ -117,9 +124,18 @@ configured destination.
 
 ## Play, update and change settings
 
-Open the app, sign in, and select **Play**. Required game updates are verified
-and installed before authentication. Optional worlds remain available through
+Open the app, sign in, and select **Play**. In the local
+[build-14 reliability candidate](RELIABILITY.md), game updates and all non-audio
+GameData archives are fully verified and installed before authentication. This
+includes classic scenery, every world's visual assets, equipment and numbered
+Mob archives. Existing verified files are reused. The first preparation can be
+large; its size comes from the current official manifest. Music and dialogue remain available through
 the game's streaming system. The launcher exits when it hands off to the game.
+
+When a qualifying optional archive download fails, **Use streaming once**
+selects ordinary asset streaming for one Play attempt. Required startup files
+are still verified, and the next Play attempts full visual preload again.
+Some visuals may still be missing until full preparation completes.
 
 In 3.2, choose **US** or **Steam** first. Steam uses the
 Wizard101 credentials created through Steam and opens the Mac Steam client when
@@ -288,6 +304,11 @@ W101_DATA_ROOT="$PWD/verification-local/manual-setup/Data" \
 `--import-game "/path/to/Wizard101"` performs first-time import.
 `--list-startup` and `--check-updates` do not replace game files.
 `--prepare-content` downloads content but does not complete runtime setup.
+Add `--prepare-visuals` to `--prepare-content` to fully prepare every non-audio
+GameData archive, or to `--check-updates` to inspect that same scope without
+replacing game files. The existing `--prepare-content --prepare-appearance`
+command retains its narrower equipment/mob scope, including numbered families.
+The GUI always prepares all visuals independently of optimization selections.
 `--protocol-probe` tests encrypted transport without sending credentials; it
 does not prove real login. Omit `W101_DATA_ROOT` only when you intend to use the
 app's normal data folder. Do not run GUI setup and CLI setup on the same data

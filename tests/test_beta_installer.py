@@ -1,6 +1,7 @@
 import copy
 import json
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -10,13 +11,15 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from build_installer import component_settings
+from live_checklist import write_checklist
 from package_shipping import BETA_LIVE_GATES, validate_beta_live, package
 from reduce_runtime import pe_snapshot, verify_preserved, strip_tool, reduce, sha
 
 
 class BetaGateTests(unittest.TestCase):
     def evidence(self):
-        return dict(components={'launcher': 'sha'}, installer_sha256='pkg-sha', gates=dict.fromkeys(BETA_LIVE_GATES, True))
+        return dict(components={'launcher': 'sha'}, installer_sha256='pkg-sha', gates=dict.fromkeys(BETA_LIVE_GATES, True),
+                    observations=dict.fromkeys(BETA_LIVE_GATES, 'Observed live on this exact candidate'))
 
     def test_synthetic_passes_do_not_authorize_beta(self):
         evidence = self.evidence(); evidence['gates'] = {'self_tests': True, 'bundle_audit': True}
@@ -45,6 +48,26 @@ class BetaGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(ValueError, 'unsigned PKG'):
                 package('unused', Path(tmp) / 'new', format='dmg', channel='community-beta')
+
+    def test_offline_sheet_covers_final_release_gates_without_claiming_passes(self):
+        evidence = self.evidence()
+        evidence.update(gates=dict.fromkeys(BETA_LIVE_GATES, False), observations={})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'LIVE-CHECKS.html'
+            write_checklist(path, evidence)
+            embedded = re.search(r'<script id="data" type="application/json">(.*?)</script>', path.read_text(), re.S)
+            data = json.loads(embedded.group(1))
+        self.assertEqual(set(data['checks']), set(BETA_LIVE_GATES))
+        self.assertEqual(data['evidence'], evidence)
+        self.assertFalse(any(data['evidence']['gates'].values()))
+        self.assertTrue(all(len(check) == 2 and all(check) for check in data['checks'].values()))
+
+    def test_offline_sheet_rejects_an_incomplete_gate_inventory(self):
+        evidence = self.evidence()
+        del evidence['gates']['visual_preload_gui_cancel_resume']
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, 'every release gate'):
+                write_checklist(Path(tmp) / 'LIVE-CHECKS.html', evidence)
 
 
 @unittest.skipUnless(shutil.which('x86_64-w64-mingw32-gcc'), 'MinGW PE compiler required')

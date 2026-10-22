@@ -70,10 +70,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 let arguments = CommandLine.arguments
+let contentPreparation: ContentPreparation = arguments.contains("--prepare-visuals") ? .visuals
+    : arguments.contains("--prepare-appearance") ? .appearance : .startup
+if arguments.contains("--prepare-visuals") && (arguments.contains("--prepare-appearance")
+    || (!arguments.contains("--prepare-content") && !arguments.contains("--check-updates"))) {
+    fputs("Use --prepare-visuals with --prepare-content or --check-updates, without --prepare-appearance.\n", stderr); exit(2)
+}
 let paths = PortablePaths()
+if arguments.contains("--install-prepared-visuals") && (!arguments.contains("--prepare-content") || contentPreparation != .startup) {
+    fputs("Use --install-prepared-visuals with --prepare-content, without a full-preload scope.\n", stderr); exit(2)
+}
 if arguments.contains("--self-test") {
     do { try runSelfTests(); exit(0) }
     catch { fputs("Self-test failed: \(error.localizedDescription)\n", stderr); exit(1) }
+}
+if arguments.contains("--game-status") || arguments.contains("--force-quit-game") {
+    do {
+        if arguments.contains("--force-quit-game") { try PrefixRecovery(paths: paths).forceQuit() }
+        print(try GameActivity.scan(prefix: paths.prefix).rawValue); exit(0)
+    } catch { fputs("\(error.localizedDescription)\n", stderr); exit(2) }
+}
+if let index = arguments.firstIndex(of: "--save-diagnostic-report") {
+    do {
+        guard index + 1 < arguments.count else { throw LauncherError.message("Pass the report destination after --save-diagnostic-report.") }
+        try DiagnosticReport(paths: paths, mode: LauncherPreferences().frameMode, diagnostics: ReliabilityDiagnostics(state: paths.state)).save(to: URL(fileURLWithPath: arguments[index + 1]))
+        print("Diagnostic report saved."); exit(0)
+    } catch { fputs("\(error.localizedDescription)\n", stderr); exit(2) }
 }
 if arguments.contains("--diagnose") {
     do {
@@ -118,17 +140,19 @@ if arguments.contains("--prepare-content") {
         let reporter = ConsoleProgress()
         let result = try NativePatcher(base: paths.game, state: paths.state, token: token, report: { update in
             reporter.report(update)
-        }).run(apply: true, prepareAppearance: arguments.contains("--prepare-appearance"))
-        if arguments.contains("--prepare-appearance") {
+        }).run(apply: true, preparation: contentPreparation, installPreparedVisuals: arguments.contains("--install-prepared-visuals"))
+        if contentPreparation != .startup {
             var archives = [[String: Any]]()
-            for record in result.manifest.records where record.appearanceArchive {
+            let cache = ChecksumCache(url: paths.state.appendingPathComponent("checksums.json"))
+            for record in result.manifest.records where contentPreparation.requiresFullArchive(record) {
                 let file = try SafeInstallation(base: paths.game).file(record.localPath)
-                guard Integrity.matches(file, size: record.size, crc: record.crc, token: token) else {
-                    throw LauncherError.message("Appearance verification failed after installation.")
+                guard try cache.valid(file, record: record, token: token, mode: .fullFile) else {
+                    throw LauncherError.message("Content verification failed after installation.")
                 }
                 archives.append(["path": record.localPath, "bytes": record.size, "crc": record.crc, "full_crc_verified": true])
             }
-            let report: [String: Any] = ["revision": result.manifest.revision, "appearance_archives": archives,
+            let report: [String: Any] = ["revision": result.manifest.revision,
+                contentPreparation == .visuals ? "visual_archives" : "appearance_archives": archives,
                 "authentication_performed": false, "game_started": false]
             print(String(decoding: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self))
         }
@@ -148,7 +172,7 @@ if arguments.contains("--patch-probe") || arguments.contains("--list-startup") {
 if arguments.contains("--check-updates") {
     do {
         let lock = try LauncherLock(directory: paths.state)
-        let result = try NativePatcher(base: paths.game, state: paths.state, token: CancellationToken(), report: { _ in }).run(apply: false)
+        let result = try NativePatcher(base: paths.game, state: paths.state, token: CancellationToken(), report: { _ in }).run(apply: false, preparation: contentPreparation)
         let report: [String: Any] = ["revision": result.manifest.revision, "records": result.manifest.records.count, "game_downloads": result.inventory.needed.count, "download_bytes": result.inventory.downloadBytes,
             "checked_files": result.inventory.checkedFiles, "validated_archive_headers": result.inventory.streamedArchives, "queued_paths": result.inventory.needed.map { $0.localPath }, "installed_files_modified": false]
         print(String(decoding: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self)); withExtendedLifetime(lock) {}; exit(0)

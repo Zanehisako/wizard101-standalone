@@ -36,7 +36,7 @@ final class GCMChunkCodec {
         let sealed = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: iv), ciphertext: Data(wire.prefix(chunkSize)), tag: wire.subdata(in: chunkSize..<chunkSize + 16))
         let clear: Data
         do { clear = try AES.GCM.open(sealed, using: SymmetricKey(data: key)) }
-        catch { throw LauncherError.message("The account-server stream failed its integrity check. Sign in again.") }
+        catch { throw AuthenticationTransportFailure.integrity }
         iv.wipe(); iv = Data(wire.suffix(16))
         return clear
     }
@@ -73,10 +73,9 @@ final class NativeEncryptedSession {
     private let tx: GCMChunkCodec
     private let rx: GCMChunkCodec
     let offer: SessionOffer
-    private var authenticatedBytes = Data()
-    private var heartbeat: UInt16 = 0
-    private var chunkCount = 0
-    private(set) var verifiedChunks = 0
+    private let replies: EncryptedReplyStream
+    var verifiedChunks: Int { replies.stats.verifiedChunks }
+    var stats: AuthenticationExchangeStats { replies.stats }
     init(connection: KIConnection, game: URL, token: CancellationToken) throws {
         self.connection = connection; self.token = token
         offer = try SessionOffer(frame: connection.receive())
@@ -87,46 +86,100 @@ final class NativeEncryptedSession {
         let reply = try RSAHandshakeReply.encrypt(nonce: decoded, seed: signed.seed, time: UInt32(Date().timeIntervalSince1970), key: key, iv: iv, publicKey: signed.publicKey)
         tx = try GCMChunkCodec(key: key, iv: iv, chunkSize: 4096)
         rx = try GCMChunkCodec(key: key, iv: iv, chunkSize: 65536)
+        replies = EncryptedReplyStream(connection: connection, token: token, tx: tx, rx: rx, sessionID: offer.id)
         var fields = Data(); fields.put(UInt16(0)); fields.put(UInt32(0)); fields.put(offer.seconds); fields.put(offer.milliseconds); fields.put(offer.id)
         fields.put(UInt32(reply.count)); fields.append(reply)
         try connection.send(KIFrame(control: true, opcode: 5, payload: fields))
     }
-    deinit { authenticatedBytes.wipe() }
-    func send(_ frame: KIFrame) throws {
-        try token.check()
-        var plain = try frame.encoded(); defer { plain.wipe() }
-        try connection.sendBytes(tx.encode(plain))
+    func send(_ frame: KIFrame) throws { try replies.send(frame) }
+    func verifyTransport() throws {
+        let frame = try replies.receive()
+        guard verifiedChunks > 0, frame.control, frame.opcode == 4, frame.payload.count == 6 else {
+            throw AuthenticationTransportFailure.invalidFrame
+        }
     }
-    private func receiveChunk() throws {
+    func receiveMessage() throws -> KIFrame { try replies.receiveMessage() }
+}
+
+struct AuthenticationExchangeStats: Codable {
+    var sentBytes = 0
+    var receivedBytes = 0
+    var verifiedChunks = 0
+    var controlFrames = 0
+    var heartbeatBatches = 0
+}
+
+// Injectable transport replays the real encrypted reader, including split tags,
+// frame boundaries and control-only peers, without credentials or a live server.
+final class EncryptedReplyStream {
+    static let maximumSentBytes = 4 * 1024 * 1024
+    static let maximumReceivedBytes = 8 * 1024 * 1024
+    private let connection: EncryptedTransport
+    private let token: CancellationToken
+    private let tx: GCMChunkCodec, rx: GCMChunkCodec
+    private let sessionID: UInt16
+    private var authenticatedBytes = Data()
+    private var wire = Data()
+    private var heartbeat: UInt16 = 0
+    private var nextHeartbeat: TimeInterval = 0
+    private(set) var stats = AuthenticationExchangeStats()
+    init(connection: EncryptedTransport, token: CancellationToken, tx: GCMChunkCodec, rx: GCMChunkCodec, sessionID: UInt16) {
+        self.connection = connection; self.token = token; self.tx = tx; self.rx = rx; self.sessionID = sessionID
+    }
+    deinit { authenticatedBytes.wipe(); wire.wipe() }
+    private func check() throws {
         try token.check()
-        // A short authentication reply otherwise waits indefinitely for the
-        // peer's fixed 64 KiB tag. Bounded control replies complete that chunk.
-        // This runs only during sign-in, never in the idle UI or gameplay.
-        guard chunkCount < 4 else { throw LauncherError.message("Sign-in exceeded the supported authenticated exchange. Try again.") }
-        chunkCount += 1
-        var controls = Data()
-        // At least 17 complete outgoing chunks are needed: 16 chunks end one
-        // byte short of the peer's first complete heartbeat response chunk.
-        for _ in 0..<4864 {
-            try token.check()
-            var payload = Data(); payload.put(offer.id); payload.put(UInt16(0)); payload.put(heartbeat); heartbeat &+= 1
+        guard connection.now < connection.deadline else { throw AuthenticationTransportFailure.deadline }
+    }
+    private func sendPlain(_ plain: Data) throws {
+        try check()
+        var encoded = try tx.encode(plain); defer { encoded.wipe() }
+        guard stats.sentBytes + encoded.count <= Self.maximumSentBytes else { throw AuthenticationTransportFailure.trafficLimit }
+        try connection.sendBytes(encoded); stats.sentBytes += encoded.count
+    }
+    func send(_ frame: KIFrame) throws {
+        var plain = try frame.encoded(); defer { plain.wipe() }
+        try sendPlain(plain)
+    }
+    private func sendHeartbeats() throws {
+        var controls = Data(); defer { controls.wipe() }
+        // 256 small controls per batch, with reads between batches. The first
+        // complete 64 KiB server tag needs about 19 batches, not one large burst.
+        for _ in 0..<256 {
+            try check()
+            var payload = Data(); payload.put(sessionID); payload.put(UInt16(0)); payload.put(heartbeat); heartbeat &+= 1
             controls.append(try KIFrame(control: true, opcode: 3, payload: payload).encoded())
         }
-        defer { controls.wipe() }
-        try connection.sendBytes(tx.encode(controls))
-        let clear = try rx.decode(connection.receiveBytes(65568))
-        authenticatedBytes.append(clear); verifiedChunks += 1
+        try sendPlain(controls); stats.heartbeatBatches += 1
+        nextHeartbeat = connection.now + 0.02
+    }
+    private func receiveChunk() throws {
+        let size = rx.chunkSize + 32
+        while wire.count < size {
+            try check()
+            if connection.now >= nextHeartbeat { try sendHeartbeats() }
+            if let part = try connection.receiveAvailable(maximum: min(16384, size - wire.count), until: min(nextHeartbeat, connection.deadline)) {
+                guard part.count <= size - wire.count, stats.receivedBytes + part.count <= Self.maximumReceivedBytes else {
+                    throw AuthenticationTransportFailure.trafficLimit
+                }
+                wire.append(part); stats.receivedBytes += part.count
+            }
+        }
+        var clear = try rx.decode(wire); defer { clear.wipe() }
+        authenticatedBytes.append(clear); wire.wipe(); stats.verifiedChunks += 1
     }
     func receive() throws -> KIFrame {
         while true {
-            try token.check()
+            try check()
             if authenticatedBytes.count >= 4 {
                 var reader = BinaryReader(data: Data(authenticatedBytes.prefix(4)))
-                guard try reader.integer(UInt16.self) == 0xf00d else { throw LauncherError.message("Invalid authenticated server frame.") }
+                guard try reader.integer(UInt16.self) == 0xf00d else { throw AuthenticationTransportFailure.invalidFrame }
                 let size = Int(try reader.integer(UInt16.self)) + 4
-                guard size >= 9 else { throw LauncherError.message("Invalid authenticated server packet size.") }
+                guard size >= 9 else { throw AuthenticationTransportFailure.invalidFrame }
                 if authenticatedBytes.count >= size {
-                    let frame = try KIFrame.decode(Data(authenticatedBytes.prefix(size)))
+                    let frame: KIFrame
+                    do { frame = try KIFrame.decode(Data(authenticatedBytes.prefix(size))) }
+                    catch { throw AuthenticationTransportFailure.invalidFrame }
                     authenticatedBytes.removeFirst(size)
                     return frame
                 }
@@ -134,18 +187,12 @@ final class NativeEncryptedSession {
             try receiveChunk()
         }
     }
-    func verifyTransport() throws {
-        let frame = try receive()
-        guard verifiedChunks > 0, frame.control, frame.opcode == 4, frame.payload.count == 6 else {
-            throw LauncherError.message("The encrypted handshake was not accepted. No credentials were sent.")
-        }
-    }
     func receiveMessage() throws -> KIFrame {
-        for _ in 0..<20000 {
+        while true {
             let frame = try receive()
             if !frame.control { return frame }
-            guard frame.opcode == 4 else { throw LauncherError.message("The account server interrupted sign-in. Try again.") }
+            guard frame.opcode == 4, frame.payload.count == 6 else { throw AuthenticationTransportFailure.invalidFrame }
+            stats.controlFrames += 1
         }
-        throw LauncherError.message("The account server did not return an authentication response. Try again.")
     }
 }

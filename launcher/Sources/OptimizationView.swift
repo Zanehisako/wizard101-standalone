@@ -16,6 +16,11 @@ struct OptimizationView: View {
                 .foregroundColor(.secondary)
             ScrollView {
               VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Game visuals").fontWeight(.semibold)
+                    Text(model.contentSummary).font(.caption).foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 option("Faster buffer decompression", detail: "Speeds up decoding complete blocks of game data.", value: $model.optimizations.buffer)
                 option("Faster streaming decompression", detail: "Speeds up decoding game data as it arrives.", value: $model.optimizations.stream)
                 option("Sharded wait queues", detail: "Reduces contention between waiting game threads.", value: $model.optimizations.waitQueues)
@@ -33,9 +38,6 @@ struct OptimizationView: View {
                 }
                 if model.plan.experimentDefaults["W101_METAL_ARCHIVE"] != nil {
                     option("Reuse compiled Metal pipelines", detail: "Reuses GPU shader pipelines after restart. Learning may take longer on the first visit.", value: $model.optimizations.metalArchive)
-                }
-                if model.plan.experimentDefaults["W101_PREPARE_APPEARANCE"] != nil {
-                    option("Download appearance assets before play", detail: "Downloads Equipment and Mob content before sign-in. About 2 GB; startup may take longer.", value: $model.optimizations.prepareAppearance)
                 }
                 if model.plan.experimentDefaults["W101_SCENE_TEXTURES"] != nil {
                     option("Reuse scene texture uploads", detail: "Prepares reusable scene textures before play. Takes effect next launch.", value: $model.optimizations.sceneTextures)

@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 from account_qualification import ACCOUNT_CHECKS
+from reliability_qualification import CHECKS as RELIABILITY_CHECKS
 
 
 CHECKS = {
@@ -26,6 +27,7 @@ CHECKS = {
     'performance_accepted': ('Accept frame pacing in real play', 'Compare with the retained Standalone Candidate at the same graphics and 60 FPS settings. Check cold entry, revisit, crowded Commons, arrivals, movement and combat. Record your acceptance or observed regression.'),
 }
 CHECKS.update(ACCOUNT_CHECKS)
+CHECKS.update(RELIABILITY_CHECKS)
 
 
 def write_checklist(destination, evidence):

@@ -76,12 +76,42 @@ struct KIFrame {
     }
 }
 
+enum AuthenticationTransportFailure: String, LocalizedError {
+    case deadline, trafficLimit, integrity, invalidFrame, disconnected
+    var errorDescription: String? {
+        switch self {
+        case .deadline: return "Sign-in timed out after 30 seconds. Try again when ready."
+        case .trafficLimit: return "The account server exceeded the sign-in traffic limit. Try again when ready."
+        case .integrity: return "The account-server stream failed its integrity check. Sign in again."
+        case .invalidFrame: return "The account server returned an unsupported encrypted reply. Try again."
+        case .disconnected: return "The server connection was interrupted. Try again."
+        }
+    }
+}
+
+protocol EncryptedTransport: AnyObject {
+    var now: TimeInterval { get }
+    var deadline: TimeInterval { get }
+    func sendBytes(_ data: Data) throws
+    // A poll timeout keeps exactly one pending read; it must not discard bytes.
+    func receiveAvailable(maximum: Int, until: TimeInterval) throws -> Data?
+}
+
 // Used only from a worker queue. Network's callbacks have their own serial queue.
-final class KIConnection {
+final class KIConnection: EncryptedTransport {
     private let connection: NWConnection
     private let token: CancellationToken
+    let deadline: TimeInterval
+    var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
+    private final class Read {
+        let done = DispatchSemaphore(value: 0)
+        var data: Data?
+        var failed = false
+    }
+    private var pendingRead: Read?
     init(host: String, port: UInt16, token: CancellationToken) throws {
         self.token = token
+        deadline = ProcessInfo.processInfo.systemUptime + 30
         connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
         let done = DispatchSemaphore(value: 0)
         var ready = false
@@ -97,36 +127,54 @@ final class KIConnection {
     deinit { connection.cancel() }
     func close() { connection.cancel() }
     private func wait(_ semaphore: DispatchSemaphore) throws {
-        let deadline = Date().addingTimeInterval(20)
-        while semaphore.wait(timeout: .now() + 0.1) == .timedOut {
+        while semaphore.wait(timeout: .now() + min(0.05, max(0, deadline - now))) == .timedOut {
             try token.check()
-            guard Date() < deadline else { throw LauncherError.message("The server did not respond in time. Try again.") }
+            guard now < deadline else { throw AuthenticationTransportFailure.deadline }
         }
         try token.check()
+        guard now < deadline else { throw AuthenticationTransportFailure.deadline }
     }
     func send(_ frame: KIFrame) throws {
         try sendBytes(frame.encoded())
     }
     func sendBytes(_ data: Data) throws {
+        try token.check()
+        guard now < deadline else { throw AuthenticationTransportFailure.deadline }
         guard !data.isEmpty else { return }
         let semaphore = DispatchSemaphore(value: 0)
         var failed = false
         connection.send(content: data, completion: .contentProcessed { error in failed = error != nil; semaphore.signal() })
         try wait(semaphore)
-        if failed { throw LauncherError.message("The server connection was interrupted. Try again.") }
+        if failed { throw AuthenticationTransportFailure.disconnected }
+    }
+    func receiveAvailable(maximum: Int, until: TimeInterval) throws -> Data? {
+        try token.check()
+        guard now < deadline else { throw AuthenticationTransportFailure.deadline }
+        let read: Read
+        if let pendingRead { read = pendingRead }
+        else {
+            read = Read(); pendingRead = read
+            connection.receive(minimumIncompleteLength: 1, maximumLength: min(maximum, 16384)) { data, _, complete, error in
+                read.data = data; read.failed = error != nil || (complete && (data?.isEmpty ?? true)); read.done.signal()
+            }
+        }
+        while read.done.wait(timeout: .now() + min(0.05, max(0, min(until, deadline) - now))) == .timedOut {
+            try token.check()
+            guard now < deadline else { throw AuthenticationTransportFailure.deadline }
+            if now >= until { return nil }
+        }
+        pendingRead = nil
+        try token.check()
+        guard now < deadline else { throw AuthenticationTransportFailure.deadline }
+        guard !read.failed, let data = read.data, !data.isEmpty else { throw AuthenticationTransportFailure.disconnected }
+        return data
     }
     func receiveBytes(_ count: Int) throws -> Data {
         var result = Data()
         while result.count < count {
             try token.check()
-            let semaphore = DispatchSemaphore(value: 0)
-            var part: Data?
             let requested = min(count - result.count, 16384)
-            connection.receive(minimumIncompleteLength: 1, maximumLength: requested) { data, _, _, _ in
-                part = data; semaphore.signal()
-            }
-            try wait(semaphore)
-            guard let part, !part.isEmpty else { throw LauncherError.message("The server connection was interrupted. Try again.") }
+            guard let part = try receiveAvailable(maximum: requested, until: deadline) else { throw AuthenticationTransportFailure.deadline }
             result.append(part)
         }
         return result

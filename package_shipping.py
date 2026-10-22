@@ -17,11 +17,12 @@ import tarfile
 import tempfile
 
 from audit_bundle import audit
-from build_app import build, launcher_inputs
+from build_app import APP_BUILD, APP_VERSION, build, launcher_inputs
 from export_clean import export
 from build_installer import APP_NAME, build_pkg, inspect_pkg
 from reduce_runtime import reduce, installed_bytes, APP_BUDGET, INSTALLER_BUDGET
 from account_qualification import ACCOUNT_GATES, write_account_checks
+from reliability_qualification import GATES as RELIABILITY_GATES, validate as validate_reliability
 
 ROOT = Path(__file__).resolve().parent
 MAGICS = {b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca'}
@@ -30,7 +31,7 @@ BETA_LIVE_GATES = ['native_login', 'character_selection', 'updates', 'audio', 'k
                    'fresh_install_gameplay', 'session_survives_launcher_exit', 'installer_install',
                    'installer_reinstall', 'rosetta_first_run', 'multiple_installations',
                    'gui_cancel_resume', 'network_interruption', 'insufficient_storage']
-BETA_LIVE_GATES += ACCOUNT_GATES
+BETA_LIVE_GATES = list(dict.fromkeys(BETA_LIVE_GATES + ACCOUNT_GATES + RELIABILITY_GATES))
 
 def sha(path):
     digest = hashlib.sha256()
@@ -64,6 +65,7 @@ def validate_beta_live(evidence, hashes, installer_sha256):
         raise ValueError('Beta live evidence must match the final app and installer exactly')
     missing = [gate for gate in BETA_LIVE_GATES if evidence.get('gates', {}).get(gate) is not True]
     if missing: raise ValueError('Unverified community beta gates: ' + ', '.join(missing))
+    validate_reliability(evidence, hashes)
 
 def signing_identity(identity):
     listing = subprocess.check_output(['security', 'find-identity', '-v', '-p', 'codesigning'], text=True)
@@ -96,10 +98,11 @@ def sign(app, identity):
 def validate_live(evidence, hashes):
     required = ['fresh_install_gameplay', 'native_login', 'character_selection', 'session_survives_launcher_exit',
                 'audio', 'keyboard_mouse', 'cursor', 'fullscreen', 'graphics', 'updates', 'gui_cancel_resume',
-                'performance_accepted', 'rosetta_first_run', 'second_apple_silicon_mac', 'oldest_supported_macos', 'clean_source_rebuild'] + ACCOUNT_GATES
+                'performance_accepted', 'rosetta_first_run', 'second_apple_silicon_mac', 'oldest_supported_macos', 'clean_source_rebuild'] + ACCOUNT_GATES + RELIABILITY_GATES
     if evidence.get('components') != hashes: raise ValueError('Live evidence must match the final signed app exactly')
     missing = [name for name in required if evidence.get('gates', {}).get(name) is not True]
     if missing: raise ValueError('Unverified public release gates: ' + ', '.join(missing))
+    validate_reliability(evidence, hashes)
 
 def stage_app(base, launcher, output, wine_fix=None, standalone=False):
     base, launcher, output = map(lambda p: Path(p).resolve(), (base, launcher, output))
@@ -133,15 +136,15 @@ def stage_app(base, launcher, output, wine_fix=None, standalone=False):
     (resources / 'Renderer/ARRIVAL-CANDIDATE.md').unlink(missing_ok=True)
     info = plistlib.loads((output / 'Contents/Info.plist').read_bytes())
     info.update(CFBundleName='Wizard101', CFBundleDisplayName='Wizard101',
-                CFBundleIdentifier='org.wizard101native.mac', CFBundleShortVersionString='3.2',
-                CFBundleVersion='8', CFBundleIconFile='Wizard101.icns', W101DefaultDataDirectory='Wizard101 Native',
+                CFBundleIdentifier='org.wizard101native.mac', CFBundleShortVersionString=APP_VERSION,
+                CFBundleVersion=APP_BUILD, CFBundleIconFile='Wizard101.icns', W101DefaultDataDirectory='Wizard101 Native',
                 W101CaptureTiming=False)
     info.pop('W101DataRoot', None)
     info.pop('W101PatchRoot', None)
     info.pop('W101DiagnosticCapture', None)
     if standalone:
         info.update(CFBundleName='Wizard101 Standalone', CFBundleDisplayName='Wizard101 Standalone',
-                    CFBundleVersion='8', W101DistributionChannel='community-beta')
+                    CFBundleVersion=APP_BUILD, W101DistributionChannel='community-beta')
     info.pop('W101AuthenticationDiagnostics', None)
     # Existing proven feature defaults are retained; experimental switches start
     # off in the new preference domain and remain available under Advanced.
@@ -266,6 +269,7 @@ def package(base, output, identity=None, notary_profile=None, live_evidence=None
         shutil.copy2(ROOT / 'ACCOUNTS.md', artifacts / 'ACCOUNTS.md')
         write_account_checks(artifacts, hashes, sha(dmg))
         report = dict(created_at=datetime.now(timezone.utc).isoformat(), public_release_ready=bool(live_evidence and identity),
+                      app_version=APP_VERSION, build_number=APP_BUILD,
                       channel=channel, format=format, installed_app_bytes=app_bytes, installer_bytes=dmg.stat().st_size,
                       size_budgets=dict(app_bytes=APP_BUDGET, installer_bytes=INSTALLER_BUDGET),
                       size_reduction=reduction, installer_audit=installer_audit, installer_sha256=sha(dmg),

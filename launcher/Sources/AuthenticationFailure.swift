@@ -3,7 +3,7 @@ import Foundation
 // Never retain the server's Reason (or any other response field) in an error.
 // These exact tokens are compared by the official Windows launcher's
 // MSG_USER_AUTHEN_RSP handler. Prefixes, suffixes and free text stay unknown.
-struct AuthenticationFailure: Error, LocalizedError, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+struct AuthenticationFailure: Codable, Error, LocalizedError, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     enum Reason: String, Codable, Sendable {
         case serverUnavailable = "server_unavailable"
         case banned, quarantined

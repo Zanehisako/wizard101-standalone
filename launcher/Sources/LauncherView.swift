@@ -36,9 +36,17 @@ struct LauncherView: View {
         .sheet(isPresented: $model.showSettings) { SettingsView(model: model) }
         .sheet(isPresented: $model.showImports) { imports }
         .alert("A little help is needed", isPresented: Binding(get: { model.issue != nil }, set: { if !$0 { model.issue = nil } })) {
-            Button("OK", role: .cancel) { model.issue = nil }
-            Button("Details", action: model.openLogs)
-        } message: { Text(model.issue ?? "") }
+            if model.contentRecovery.canOfferStreaming {
+                Button("Retry full preload", role: .cancel, action: model.retryVisualPreload)
+                Button("Use streaming once", action: model.chooseStreamingOnce)
+            } else {
+                Button("OK", role: .cancel) { model.issue = nil }
+                Button("Details", action: model.openLogs)
+            }
+        } message: {
+            Text((model.issue ?? "") + (model.contentRecovery.canOfferStreaming
+                ? "\n\nFull preload could not finish. You can play with on-demand downloads for one launch. Some visuals may still be missing." : ""))
+        }
     }
     private var adventure: some View {
         ZStack {
@@ -88,11 +96,12 @@ struct LauncherView: View {
                 .font(.system(size: 12)).foregroundColor(ink.opacity(0.7)).padding(.top, 7)
             if !model.ready { setupSteps.padding(.top, 16) }
             ornament.padding(.top, 16).padding(.bottom, 16)
-            if model.ready { login } else { setup }
+            if model.gameActivity != .idle { runningGame }
+            else if model.ready { login } else { setup }
             Spacer(minLength: 16)
             if model.busy || model.lastFailure != nil || !model.ready {
                 VStack(spacing: 8) {
-                    if model.busy {
+                    if model.busy && model.gameActivity == .idle {
                         if let progress = model.progress { ProgressView(value: progress).tint(ink) }
                         else { ProgressView().controlSize(.small).tint(ink) }
                     }
@@ -148,15 +157,31 @@ struct LauncherView: View {
             }
             Toggle("Remember me", isOn: $model.savePassword).toggleStyle(.checkbox).font(.system(size: 12)).help("Save your password securely in Mac Keychain.")
             Button(action: model.launch) {
-                Label(model.busy ? "Preparing…" : "Play", systemImage: model.busy ? "hourglass" : "play.fill")
+                Label(model.busy ? "Preparing…" : model.contentRecovery.streamingOnce ? "Play with streaming" : "Play", systemImage: model.busy ? "hourglass" : "play.fill")
                     .font(.system(size: 22, weight: .bold, design: .serif)).frame(maxWidth: .infinity).frame(height: 52)
             }.buttonStyle(SpellButtonStyle()).disabled(!canPlay).keyboardShortcut(.defaultAction)
+            if model.contentRecovery.streamingOnce {
+                Button("Retry full preload", action: model.retryVisualPreload)
+                    .buttonStyle(.plain).underline().font(.system(size: 11))
+            }
             HStack {
                 Spacer()
                 Link("Forgot password?", destination: URL(string: "https://www.wizard101.com/user/account/needhelp")!).font(.system(size: 11)).foregroundColor(ink.opacity(0.7)).underline()
                 Spacer()
             }
         }.disabled(model.busy)
+    }
+    private var runningGame: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "gamecontroller.fill").font(.system(size: 44)).padding(.vertical, 18)
+            Text(model.gameActivity == .game ? "Wizard101 is running" : "Official launcher is open")
+                .font(.system(size: 20, weight: .semibold, design: .serif))
+            Text("If the game is stuck, close it here and sign in again.")
+                .font(.system(size: 13)).multilineTextAlignment(.center)
+            Button("Force Quit Game", role: .destructive, action: model.forceQuitGame)
+                .disabled(!model.canForceQuit)
+            Button("Save Diagnostic Report", action: model.saveDiagnosticReport).disabled(model.savingReport)
+        }
     }
     private var canPlay: Bool {
         NativeAuthentication.encryptedHandshakeVerified && model.ready && !model.busy &&
@@ -252,10 +277,7 @@ private struct SettingsView: View {
                 Text("Settings").font(.system(size: 29, weight: .bold, design: .serif))
                 Spacer()
             }
-            Group {
-                if advanced { ScrollView { settingsContent }.scrollIndicators(.hidden) }
-                else { settingsContent }
-            }
+            ScrollView { settingsContent }.scrollIndicators(.hidden)
             Spacer(minLength: 0)
             HStack {
                 Link(destination: URL(string: "https://www.wizard101.com/game/help-faq")!) {
@@ -313,6 +335,12 @@ private struct SettingsView: View {
                             Divider().overlay(ink.opacity(0.1)).padding(.vertical, 10)
                             action("Forget saved password", symbol: "key.fill", disabled: model.busy || model.username.isEmpty,
                                    help: "Remove the remembered password from Mac Keychain.", run: model.forgetPassword)
+                            Divider().overlay(ink.opacity(0.1)).padding(.vertical, 10)
+                            action("Save Diagnostic Report", symbol: "doc.text", disabled: model.savingReport,
+                                   help: "Save safe local troubleshooting details.", run: model.saveDiagnosticReport)
+                            if let summary = model.reportSummary {
+                                Text(summary).font(.system(size: 11)).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+                            }
                         }
                     }
                     card {

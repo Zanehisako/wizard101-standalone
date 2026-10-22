@@ -13,6 +13,8 @@ import json
 
 PROJECT = Path(__file__).resolve().parent
 ROOT = PROJECT / "launcher"
+APP_VERSION = '3.2'
+APP_BUILD = '15'
 
 def launcher_inputs():
     paths = [Path(__file__).resolve()] + sorted(p for p in ROOT.rglob('*') if p.is_file())
@@ -71,7 +73,7 @@ def build(output=None, runtime=None, renderer=None, development=False, data_root
             'CFBundleIdentifier': 'org.wizard101native.portable',
             'CFBundleExecutable': 'Wizard101Native', 'CFBundlePackageType': 'APPL',
             'CFBundleIconFile': 'Wizard101.icns',
-            'CFBundleShortVersionString': '3.2', 'CFBundleVersion': '8',
+            'CFBundleShortVersionString': APP_VERSION, 'CFBundleVersion': APP_BUILD,
             'LSMinimumSystemVersion': '13.0', 'NSHighResolutionCapable': True,
             'NSPrincipalClass': 'NSApplication',
             'NSAppTransportSecurity': {'NSExceptionDomains': {'versionak.us.wizard101.com': {'NSExceptionAllowsInsecureHTTPLoads': True, 'NSIncludesSubdomains': False}}},

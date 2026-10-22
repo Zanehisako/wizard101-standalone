@@ -1,6 +1,6 @@
 # Wizard101 Standalone — Community Beta
 
-**Version 3.2: experimental Steam community beta.** Choose **US / Steam** in
+**Version 3.2 beta 2, build 15: experimental community beta.** Choose **US / Steam** in
 the native sign-in form. The project owner confirmed Steam working locally on
 2026-10-16. Full two-provider gameplay, relaunch and ten-minute launcher-handoff
 qualification remains pending; see [the account checks](ACCOUNTS.md) and
@@ -8,12 +8,20 @@ qualification remains pending; see [the account checks](ACCOUNTS.md) and
 This beta is unsigned and not notarized; `public_release_ready` remains false.
 Game content downloads separately.
 
+This update packages the build-14 reliability changes: bounded sign-in,
+resumable visual downloads, verified installation of completed staging and
+prefix-scoped game recovery. Full visual preload remains the default. After
+an eligible optional download failure, **Use streaming once** applies to one
+Play attempt; the next Play attempts full preload again. Partial downloads and
+existing settings stay in place. Streaming does not mark the full preload
+complete, and a graphics or Alt-Tab fix is not established by this release.
+
 Keep your previous app for rollback before using the installer: it replaces
 `/Applications/Wizard101 Standalone.app`. The
 [previous US-only 3.1 beta](https://github.com/Zanehisako/wizard101-standalone/releases/tag/v3.1-community-beta.1)
 remains available. Existing standalone game content and settings are reused.
 
-1. Download [**Wizard101-AppleSilicon-community-beta.pkg**](https://github.com/Zanehisako/wizard101-standalone/releases/download/v3.2-community-beta.1/Wizard101-AppleSilicon-community-beta.pkg)
+1. Download [**Wizard101-AppleSilicon-community-beta.pkg**](https://github.com/Zanehisako/wizard101-standalone/releases/download/v3.2-community-beta.2/Wizard101-AppleSilicon-community-beta.pkg)
    and open it. Verify it against the accompanying `SHA256SUMS.txt` if desired.
 2. If macOS blocks it, open **System Settings → Privacy & Security**, scroll to
    Security, choose **Open Anyway**, and confirm **Open**. The `INSTALL.html`

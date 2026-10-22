@@ -34,6 +34,8 @@ FILES += ['build_metal_archive.py', 'verify_metal_archive.py', 'package_metal_ar
           'ARRIVAL-CANDIDATE.md', 'package_shipping.py', 'rebuild_shipping_wine.py', 'SHIPPING.md']
 FILES += ['reduce_runtime.py', 'build_installer.py', 'publish_beta.py', 'live_checklist.py', 'COMMUNITY-BETA.md', 'BETA-QUALIFICATION.md']
 FILES += ['ACCOUNTS.md', 'account_qualification.py', 'install_account_candidate.py', 'build_account_diagnostic.py']
+FILES += ['RELIABILITY.md', 'reliability_qualification.py', 'build_reliability_candidate.py',
+          'audit_reliability_content.py', 'verify_reliability_runtime.py']
 FILES += ['SUPPORT.md', '.github/ISSUE_TEMPLATE/config.yml']
 DIRECTORIES += ['installer']
 ALLOWED = {'.swift', '.c', '.h', '.cpp', '.mm', '.metal', '.vert', '.frag', '.comp', '.py', '.md', '.json', '.txt', '.patch', '.S'}

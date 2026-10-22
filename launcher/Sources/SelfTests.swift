@@ -17,6 +17,8 @@ func runSelfTests() throws {
     try runSetupTests(check: check, rejects: rejects)
     try runAccountTests(check: check, rejects: rejects)
     try runAuthenticationTests(check: check, rejects: rejects)
+    try runReliabilityTests(check: check, rejects: rejects)
+    try runVisualContentTests(check: check, rejects: rejects)
     let presentationSuite = "org.wizard101native.presentation.test." + UUID().uuidString
     let presentationDefaults = UserDefaults(suiteName: presentationSuite)!
     defer { presentationDefaults.removePersistentDomain(forName: presentationSuite) }
@@ -346,7 +348,7 @@ func runSelfTests() throws {
     let defaultAppearance = try PatchInventory.inspect(records: appearanceRecords, base: base, cache: cache, token: token)
     try check(defaultAppearance.needed.isEmpty && defaultAppearance.optionalMissing == 3,
               "Appearance downloads default off and retain normal streamed-header validation")
-    let fullAppearance = try PatchInventory.inspect(records: appearanceRecords, base: base, cache: cache, token: token, prepareAppearance: true)
+    let fullAppearance = try PatchInventory.inspect(records: appearanceRecords, base: base, cache: cache, token: token, preparation: .appearance)
     try check(fullAppearance.needed == [equipment, mob] && fullAppearance.headerBootstraps.isEmpty
               && fullAppearance.downloadBytes == 120000 && fullAppearance.optionalMissing == 2,
               "Appearance preparation rejects header-valid incomplete body and fully downloads missing Mob")
@@ -390,10 +392,10 @@ func runSelfTests() throws {
     try check(try Data(contentsOf: equipmentFile) == sparseBefore, "Corrupt staged appearance preserves installed bytes")
     try FixtureHTTP.content.write(to: mobStage)
     try transaction.commit([(equipment, equipmentStage), (mob, mobStage)], token: token)
-    let readyAppearance = try PatchInventory.inspect(records: appearanceRecords, base: base, cache: cache, token: token, prepareAppearance: true)
+    let readyAppearance = try PatchInventory.inspect(records: appearanceRecords, base: base, cache: cache, token: token, preparation: .appearance)
     try check(readyAppearance.needed.isEmpty, "Full CRC-verified appearance archives are reused")
     try corruptAppearance.write(to: equipmentFile)
-    let corruptInstalled = try PatchInventory.inspect(records: appearanceRecords, base: base, cache: cache, token: token, prepareAppearance: true)
+    let corruptInstalled = try PatchInventory.inspect(records: appearanceRecords, base: base, cache: cache, token: token, preparation: .appearance)
     try check(corruptInstalled.needed == [equipment], "Appearance detects body corruption despite valid header and cached full CRC")
     var zeros = [UInt8](repeating: 0, count: 32), zeroIV = [UInt8](repeating: 0, count: 16), block = [UInt8](repeating: 0, count: 16)
     zeros.withUnsafeBufferPointer { key in zeroIV.withUnsafeBufferPointer { iv in
@@ -449,7 +451,7 @@ func runSelfTests() throws {
     try check(try Data(contentsOf: networkStage) == Data(appearanceHeader)
               && !Integrity.matches(networkStage, size: equipment.size, crc: equipment.crc, token: token), "Verified prefix stays partial and cannot satisfy full-file CRC")
     try download("blocked-header")
-    try check(try Data(contentsOf: networkStage) == FixtureHTTP.content && FixtureHTTP.lastRange == "bytes=32-",
+    try check(try Data(contentsOf: networkStage) == FixtureHTTP.content && FixtureHTTP.lastRange == "bytes=32-59999",
               "Full archive resumes after the verified header and passes body CRC")
     try FixtureHTTP.content.prefix(4000).write(to: networkStage)
     try check(!ArchivePrefix.required(record: equipment, destination: networkStage), "Body download progress is retained without reseeding the prefix")
@@ -470,7 +472,7 @@ func runSelfTests() throws {
     try fm.removeItem(at: networkStage)
     try FixtureHTTP.content.prefix(257).write(to: networkStage)
     try download("resume")
-    try check(try Data(contentsOf: networkStage) == FixtureHTTP.content && FixtureHTTP.lastRange == "bytes=257-", "Range download resumes partial file")
+    try check(try Data(contentsOf: networkStage) == FixtureHTTP.content && FixtureHTTP.lastRange == "bytes=257-59999", "Range download resumes partial file")
     try FixtureHTTP.content.prefix(257).write(to: networkStage); try download("ignore-range")
     try check(try Data(contentsOf: networkStage) == FixtureHTTP.content, "Server ignoring Range restarts safely")
     try FixtureHTTP.content.prefix(257).write(to: networkStage)
@@ -487,7 +489,35 @@ func runSelfTests() throws {
     try download("resume")
     try check(try Data(contentsOf: networkStage) == FixtureHTTP.content, "Cancelled download resumes successfully")
     try fm.removeItem(at: networkStage); try download("drop-once") { if $0 >= 4000 { FixtureHTTP.dropReady.signal() } }
-    try check(try Data(contentsOf: networkStage) == FixtureHTTP.content && FixtureHTTP.lastRange == "bytes=4000-", "Transient connection loss retries by resuming validated range")
+    try check(try Data(contentsOf: networkStage) == FixtureHTTP.content && FixtureHTTP.lastRange == "bytes=4000-59999", "Transient connection loss retries by resuming validated range")
+    try fm.removeItem(at: networkStage)
+    FixtureHTTP.boundedDrops = [2000, 10000, 18000, 26000, 34000, 42000, 50000, 58000]
+    let boundaries = Set(FixtureHTTP.boundedDrops.map { UInt64($0) })
+    try HTTPTransfer.download(url: URL(string: "http://versionak.us.wizard101.com/bounded")!, to: networkStage,
+        size: UInt64(FixtureHTTP.content.count), token: CancellationToken(), progress: { if boundaries.contains($0) { FixtureHTTP.boundedDropReady.signal() } },
+        testConfiguration: httpConfig, testChunkSize: 4096)
+    try check(FixtureHTTP.boundedDrops.isEmpty && (try Data(contentsOf: networkStage)) == FixtureHTTP.content,
+              "Bounded ranges complete a download across eight separate connection losses without restarting accepted progress")
+    try check(FixtureHTTP.boundedRanges.first == "bytes=0-4095" && FixtureHTTP.boundedRanges.allSatisfy { value in
+        let parts = value.dropFirst(6).split(separator: "-").compactMap { Int($0) }
+        return parts.count == 2 && parts[1] - parts[0] + 1 <= 4096
+    }, "Every bounded request includes an explicit start and end within its size limit")
+    try FixtureHTTP.content.prefix(257).write(to: networkStage)
+    try rejects("A server returning the wrong end of a bounded range is rejected") {
+        try HTTPTransfer.download(url: URL(string: "http://versionak.us.wizard101.com/bad-end")!, to: networkStage,
+            size: UInt64(FixtureHTTP.content.count), token: CancellationToken(), progress: { _ in },
+            testConfiguration: httpConfig, testChunkSize: 4096)
+    }
+    try check((try Data(contentsOf: networkStage)) == FixtureHTTP.content.prefix(257), "Rejected range endpoints leave staged bytes untouched")
+    let chunkCancel = CancellationToken()
+    try rejects("Cancelling between bounded ranges stops before the next request") {
+        try HTTPTransfer.download(url: URL(string: "http://versionak.us.wizard101.com/resume")!, to: networkStage,
+            size: UInt64(FixtureHTTP.content.count), token: chunkCancel, progress: { if $0 >= 4353 { chunkCancel.cancel() } },
+            testConfiguration: httpConfig, testChunkSize: 4096)
+    }
+    let acceptedChunk = try Data(contentsOf: networkStage)
+    try check(acceptedChunk == FixtureHTTP.content.prefix(acceptedChunk.count) && acceptedChunk.count < FixtureHTTP.content.count,
+              "Cancelled bounded download retains only accepted content for a later resume")
     let dns: [String: Any] = ["Status": 0, "TC": false,
         "Question": [["name": CDNRoute.host + ".", "type": 1]],
         "Answer": [["name": CDNRoute.host, "type": 5, "TTL": 20, "data": "edge.example."],
@@ -541,7 +571,7 @@ func runSelfTests() throws {
     try HTTPTransfer.download(url: URL(string: "http://versionak.us.wizard101.com/route-rotate")!, to: networkStage,
         size: UInt64(FixtureHTTP.content.count), token: CancellationToken(), progress: { if $0 >= 4257 { FixtureHTTP.routeDropReady.signal() } }, testConfiguration: httpConfig,
         testRoutes: { _ in routeLookups += 1; FixtureHTTP.routeReady = true; return ["23.210.92.230", "23.210.73.204"] })
-    try check(routeLookups == 2 && FixtureHTTP.lastRange == "bytes=4257-" && (try Data(contentsOf: networkStage)) == FixtureHTTP.content,
+    try check(routeLookups == 2 && FixtureHTTP.lastRange == "bytes=4257-59999" && (try Data(contentsOf: networkStage)) == FixtureHTTP.content,
               "Repeated network failures rotate bounded routes and retain accepted partial bytes for exact resume")
     try check(Integrity.matches(networkStage, size: UInt64(FixtureHTTP.content.count), crc: FixtureHTTP.content.kiCRC, token: token), "Route-recovered content still requires the exact full-file CRC")
     try FixtureHTTP.content.prefix(257).write(to: networkStage); routeLookups = 0
@@ -560,6 +590,8 @@ private final class FixtureHTTP: URLProtocol {
     static var lastRange: String?
     static var droppedOnce = false
     static var routeReady = false, routeDropped = false
+    static var boundedDrops = [Int](), boundedRanges = [String]()
+    static let boundedDropReady = DispatchSemaphore(value: 0)
     static let routeDropReady = DispatchSemaphore(value: 0)
     static let dropReady = DispatchSemaphore(value: 0)
     override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "versionak.us.wizard101.com" }
@@ -567,7 +599,9 @@ private final class FixtureHTTP: URLProtocol {
     override func startLoading() {
         guard let url = request.url else { return }
         let range = request.value(forHTTPHeaderField: "Range"); Self.lastRange = range
-        var offset = Int(range?.dropFirst(6).dropLast() ?? "0") ?? 0
+        let requested = range?.dropFirst(6).split(separator: "-", omittingEmptySubsequences: false) ?? []
+        var offset = requested.first.flatMap { Int($0) } ?? 0
+        var end = requested.last.flatMap { Int($0) } ?? Self.content.count - 1
         if url.path == "/blocked-header" && offset < 32 {
             client?.urlProtocol(self, didFailWithError: NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost)); return
         }
@@ -575,12 +609,24 @@ private final class FixtureHTTP: URLProtocol {
             client?.urlProtocol(self, didFailWithError: NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost)); return
         }
         let ignore = url.path == "/ignore-range"
-        if ignore { offset = 0 }
-        let status = offset > 0 ? 206 : 200
+        if ignore { offset = 0; end = Self.content.count - 1 }
+        let status = range != nil && !ignore ? 206 : 200
         var headers: [String: String] = [:]
-        if status == 206 { headers["Content-Range"] = "bytes \(url.path == "/bad-range" ? offset + 1 : offset)-\(Self.content.count - 1)/\(Self.content.count)" }
+        if status == 206 { headers["Content-Range"] = "bytes \(url.path == "/bad-range" ? offset + 1 : offset)-\(url.path == "/bad-end" ? end + 1 : end)/\(Self.content.count)" }
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if url.path == "/bounded" {
+            Self.boundedRanges.append(range ?? "")
+            if let boundary = Self.boundedDrops.first, offset < boundary, boundary <= end {
+                Self.boundedDrops.removeFirst()
+                client?.urlProtocol(self, didLoad: Self.content.subdata(in: offset..<boundary))
+                DispatchQueue.global().async {
+                    _ = Self.boundedDropReady.wait(timeout: .now() + 3)
+                    self.client?.urlProtocol(self, didFailWithError: NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost))
+                }
+                return
+            }
+        }
         if url.path == "/route-rotate" && !Self.routeDropped {
             Self.routeDropped = true
             client?.urlProtocol(self, didLoad: Self.content.subdata(in: offset..<offset+4000))
@@ -601,9 +647,10 @@ private final class FixtureHTTP: URLProtocol {
         }
         var data = url.path == "/corrupt" ? Data(repeating: 42, count: Self.content.count) : Self.content
         if url.path == "/oversize" { data.append(1) }
-        while offset < data.count {
-            let end = min(offset + 4000, data.count)
-            client?.urlProtocol(self, didLoad: data.subdata(in: offset..<end)); offset = end
+        let limit = url.path == "/oversize" ? data.count : min(end + 1, data.count)
+        while offset < limit {
+            let next = min(offset + 4000, limit)
+            client?.urlProtocol(self, didLoad: data.subdata(in: offset..<next)); offset = next
         }
         client?.urlProtocolDidFinishLoading(self)
     }

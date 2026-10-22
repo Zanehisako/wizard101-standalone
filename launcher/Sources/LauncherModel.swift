@@ -36,14 +36,20 @@ final class LauncherModel: ObservableObject {
         didSet { rememberAccount() }
     }
     @Published var busy = false
+    @Published private(set) var gameActivity = GameActivity.idle
+    @Published private(set) var recovering = false
+    @Published private(set) var savingReport = false
+    @Published var reportSummary: String?
     @Published var canCancel = false
     @Published var status = "Checking your installation…"
     @Published var detail = ""
     @Published var issue: String?
     @Published private(set) var lastFailure: String?
+    @Published private(set) var contentRecovery = ContentRecovery()
     @Published var ready = false
     @Published var progress: Double?
     @Published var updateSummary: String?
+    @Published private(set) var contentSummary = "All game visuals are downloaded and verified before sign-in. Music and dialogue can stream during play."
     let renderer: SpiralRenderer?
     let gpu: String
     private var process: Process?
@@ -54,6 +60,9 @@ final class LauncherModel: ObservableObject {
     private var logURL: URL?
     private var scanning = false
     private var changingProvider = false
+    private var handoffStarted = false
+    lazy var reliability = ReliabilityDiagnostics(state: state)
+    var canForceQuit: Bool { gameActivity != .idle && token == nil && !recovering && operationLock == nil }
     private var keychain: PasswordStore { PasswordStore(service: provider.keychainService) }
     var state: URL { paths.state }
     var plan: LaunchPlan {
@@ -66,6 +75,7 @@ final class LauncherModel: ObservableObject {
 
     init(paths: PortablePaths) {
         self.paths = paths
+        if let readiness = ContentReadiness.load(state: paths.state) { contentSummary = readiness.summary }
         if combinedOptimizations { optimizations = .load() }
         if Bundle.main.object(forInfoDictionaryKey: "W101WorkloadDiagnostics") as? Bool == true { profile = false; warmup = false }
         if let device = MTLCreateSystemDefaultDevice(), let shader = Bundle.main.url(forResource: "Spiral", withExtension: "metal"),
@@ -77,11 +87,14 @@ final class LauncherModel: ObservableObject {
         username = accounts.username(for: accounts.provider)
         savePassword = accounts.remembersPassword(for: accounts.provider)
         changingProvider = false
-        refresh()
+        refresh(); scan()
         if ready, savePassword, !username.isEmpty { loadPassword() }
     }
     func refresh() {
+        guard token == nil, !recovering, !handoffStarted else { return }
+        if gameActivity != .idle { scan(); return }
         guard !busy else { return }
+        defer { scan() }
         setupAvailable = false
         setupStarted = FileManager.default.fileExists(atPath: paths.prefix.appendingPathComponent("system.reg").path)
         installedGames = InstalledGame.discover(excluding: paths.game)
@@ -95,7 +108,6 @@ final class LauncherModel: ObservableObject {
             setupAvailable = true
             try plan.validateInstallation(); ready = true
             if lastFailure == nil { status = "Ready for adventure"; detail = ""; issue = nil }
-            scan()
         } catch {
             ready = false
             status = setupAvailable ? "Welcome, wizard!" : "Setup needs attention"
@@ -135,7 +147,7 @@ final class LauncherModel: ObservableObject {
     private func setup(importing source: URL?) {
         guard !busy else { return }
         let token = CancellationToken(); self.token = token; busy = true; canCancel = true
-        let paths = paths
+        let paths = paths, diagnostics = reliability
         let reporter = ProgressReporter { update in DispatchQueue.main.async { self.status = update.phase; self.detail = update.detail; self.progress = update.fraction } }
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -147,6 +159,7 @@ final class LauncherModel: ObservableObject {
                 withExtendedLifetime(lock) {}
                 DispatchQueue.main.async { self.busy = false; self.canCancel = false; self.token = nil; self.refresh() }
             } catch {
+                if !(error is CancellationError) { diagnostics.increment(.patchFailures) }
                 DispatchQueue.main.async {
                     self.token = nil
                     self.setupStarted = true
@@ -165,6 +178,7 @@ final class LauncherModel: ObservableObject {
         rememberAccount()
         changingProvider = true
         password = ""; issue = nil; lastFailure = nil; detail = ""
+        contentRecovery.clear()
         provider = selected
         let accounts = AccountPreferences()
         accounts.provider = selected
@@ -181,7 +195,7 @@ final class LauncherModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result { try keychain.load(account: account) }
             DispatchQueue.main.async {
-                self.busy = false
+                self.busy = self.gameActivity != .idle
                 switch result {
                 case .success(let value): if self.username == account && self.provider == selectedProvider { self.password = value ?? ""; self.detail = value == nil ? "No password is saved for this account." : "Password loaded from Mac Keychain." }
                 case .failure(let error): self.fail(error.localizedDescription)
@@ -196,7 +210,7 @@ final class LauncherModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result { try keychain.remove(account: account) }
             DispatchQueue.main.async {
-                self.busy = false
+                self.busy = self.gameActivity != .idle
                 switch result {
                 case .success: self.password = ""; self.savePassword = false; self.detail = "Saved password removed from Keychain."
                 case .failure(let error): self.fail(error.localizedDescription)
@@ -205,14 +219,23 @@ final class LauncherModel: ObservableObject {
         }
     }
     func launch() { begin(checkOnly: false) }
+    func chooseStreamingOnce() {
+        guard !busy, contentRecovery.canOfferStreaming else { return }
+        contentRecovery.chooseStreaming()
+        issue = nil; lastFailure = nil
+        status = "Streaming selected for next play"
+        detail = "Some visuals may still be missing. Full preload will be retried on your next launch."
+    }
+    func retryVisualPreload() { contentRecovery.clear(); issue = nil }
     func checkUpdates() { begin(checkOnly: true) }
     func cancel() { token?.cancel(); canCancel = false; status = "Cancelling…"; detail = "Partial downloads will be kept for retry." }
     func shutdown() { token?.cancel() }
     private func begin(checkOnly: Bool) {
-        guard ready, !busy, !scanning else { return }
+        guard ready, !busy, !scanning, gameActivity == .idle else { return }
+        let preparation: ContentPreparation = checkOnly ? .visuals : contentRecovery.preparationForPlay()
         let account = username.trimmingCharacters(in: .whitespacesAndNewlines), secret = password, save = savePassword, selectedProvider = provider
         var selected = plan
-        let directory = state, keychain = keychain
+        let directory = state, keychain = keychain, reliability = reliability
         let diagnostics = Bundle.main.object(forInfoDictionaryKey: "W101AuthenticationDiagnostics") as? Bool == true
             ? AuthenticationDiagnostics(url: directory.appendingPathComponent("AuthenticationFailure.json")) : nil
         try? diagnostics?.clear()
@@ -233,8 +256,12 @@ final class LauncherModel: ObservableObject {
                         try FirstRun(paths: selected.paths, token: token, report: { _ in }).installRenderer()
                     }
                     // Update bootstrap files before any credentials are sent.
-                    _ = try patcher.run(apply: true, prepareAppearance: selected.experimentFeatures["W101_PREPARE_APPEARANCE"] == "1")
-                    let auth = NativeAuthentication(base: selected.gameDirectory, provider: selectedProvider)
+                    _ = try patcher.run(apply: true, preparation: preparation, installPreparedVisuals: preparation == .startup)
+                    DispatchQueue.main.async {
+                        self.contentSummary = ContentReadiness.load(state: directory)?.summary ?? self.contentSummary
+                        if preparation == .startup { self.contentSummary = "Using on-demand visuals for this launch. Full visual preload remains incomplete." }
+                    }
+                    let auth = NativeAuthentication(base: selected.gameDirectory, provider: selectedProvider, diagnostics: reliability)
                     var session = try auth.signIn(username: account, password: secret, token: token)
                     if save { try keychain.save(account: account, password: secret) }
                     else { try keychain.remove(account: account) }
@@ -245,18 +272,20 @@ final class LauncherModel: ObservableObject {
                     try selected.validate(); try token.check(); try NativePatcher.requireClosed()
                     DispatchQueue.main.async { self.operationLock = lock; self.password = ""; self.canCancel = false; self.start(selected) }
                 } else {
-                    let result = try patcher.run(apply: false, prepareAppearance: selected.experimentFeatures["W101_PREPARE_APPEARANCE"] == "1")
+                    let result = try patcher.run(apply: false, preparation: .visuals)
                     withExtendedLifetime(lock) {}
                     DispatchQueue.main.async {
                         self.busy = false; self.canCancel = false; self.token = nil
+                        self.contentSummary = ContentReadiness.load(state: directory)?.summary ?? self.contentSummary
                         self.updateSummary = result.inventory.needed.isEmpty ? "Game is up to date." : "Updates will install when you press Play."
                     }
                 }
             } catch {
-                let error: Error = token.isCancelled ? CancellationError() : error
                 try? diagnostics?.record(error)
                 DispatchQueue.main.async {
                     self.password = ""; self.token = nil
+                    self.contentSummary = ContentReadiness.load(state: directory)?.summary ?? self.contentSummary
+                    if !checkOnly { self.contentRecovery.failed(error) }
                     if checkOnly { self.updateSummary = error is CancellationError ? "Update check cancelled." : "Couldn’t check updates." }
                     if error is CancellationError { self.busy = false; self.canCancel = false; self.progress = nil; self.status = "Cancelled"; self.detail = "Retry when ready. Partial downloads remain staged." }
                     else { self.fail(error.localizedDescription) }
@@ -282,7 +311,10 @@ final class LauncherModel: ObservableObject {
             child.standardOutput = FileHandle.nullDevice; child.standardError = FileHandle.nullDevice
             child.terminationHandler = { process in DispatchQueue.main.async { self.finished(process.terminationStatus) } }
             logURL = logs; process = child; launchedSession = launchPlan.session
-            try child.run(); beginMonitoring()
+            try child.run()
+            // Reporting must never interrupt a successful game launch.
+            try? LaunchDiagnosticSnapshot.record(plan: launchPlan, run: logs)
+            handoffStarted = true; beginMonitoring()
         } catch { fail(error.localizedDescription) }
     }
     private func beginMonitoring() {
@@ -293,24 +325,27 @@ final class LauncherModel: ObservableObject {
     private func scan() {
         guard !scanning else { return }; scanning = true
         DispatchQueue.global(qos: .utility).async {
-            let result = Result { try GameActivity.scan() }
+            let result = Result { try GameActivity.scan(prefix: self.paths.prefix) }
             DispatchQueue.main.async {
                 self.scanning = false
                 switch result {
                 case .success(let activity):
-                    if activity == .game {
+                    self.gameActivity = activity
+                    if GameActivity.shouldExitAfterHandoff(activity: activity, startedHere: self.handoffStarted) {
                         // The game is an independent process. Quitting here
                         // closes only the native launcher after handoff.
                         NSApp.terminate(nil)
                         return
                     }
+                    guard self.token == nil, !self.recovering else { return }
                     if activity != .idle {
                         self.busy = true; self.canCancel = false
                         self.status = activity == .game ? "Wizard101 is running" : "Official launcher is open"
-                        self.detail = activity == .game ? "Enjoy your adventure." : "Close the official launcher before native sign-in or updates."
+                        self.detail = "Close it normally, or use Force Quit Game if it is stuck."
                         self.beginMonitoring()
                     } else if self.process?.isRunning != true && self.token == nil {
                         self.busy = false; self.operationLock = nil; self.timer?.invalidate(); self.timer = nil
+                        if self.ready && self.lastFailure == nil { self.status = "Ready for adventure"; self.detail = "" }
                     }
                 case .failure(let error): self.fail(error.localizedDescription)
                 }
@@ -318,7 +353,7 @@ final class LauncherModel: ObservableObject {
         }
     }
     private func finished(_ code: Int32) {
-        process = nil; token = nil; launchedSession = nil
+        process = nil; token = nil; launchedSession = nil; handoffStarted = false
         if code != 0 { fail("The game exited with code \(code). Sign in again to retry.") }
         else { status = "Game closed"; detail = "Sign in to play again."; scan() }
     }
@@ -332,6 +367,43 @@ final class LauncherModel: ObservableObject {
         let directory = logURL ?? paths.prefix.appendingPathComponent("drive_c/NativeLogs")
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         NSWorkspace.shared.open(directory)
+    }
+    func forceQuitGame() {
+        guard canForceQuit else { return }
+        recovering = true; busy = true; canCancel = false
+        status = "Closing Wizard101…"; detail = "Closing this installation's game processes."
+        let recovery = PrefixRecovery(paths: paths), diagnostics = reliability
+        diagnostics.increment(.recoveryAttempts)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try recovery.forceQuit() }
+            DispatchQueue.main.async {
+                self.recovering = false
+                switch result {
+                case .success:
+                    self.gameActivity = .idle; self.busy = false; self.lastFailure = nil; self.issue = nil
+                    self.status = "Game closed"; self.detail = "Sign in when ready."; self.password = ""; self.scan()
+                case .failure(let error): diagnostics.increment(.recoveryFailures); self.fail(error.localizedDescription); self.scan()
+                }
+            }
+        }
+    }
+    func saveDiagnosticReport() {
+        guard !savingReport else { return }
+        let panel = NSSavePanel(); panel.nameFieldStringValue = "Wizard101-Diagnostic-Report.json"
+        panel.message = "Save Mac details, component hashes, graphics settings and safe failure counters."
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        savingReport = true; reportSummary = "Saving report…"
+        let report = DiagnosticReport(paths: paths, mode: mode, diagnostics: reliability)
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result { try report.save(to: destination) }
+            DispatchQueue.main.async {
+                self.savingReport = false
+                switch result {
+                case .success: self.reportSummary = "Diagnostic report saved."
+                case .failure: self.reportSummary = "Couldn’t save the report. Choose another location and retry."
+                }
+            }
+        }
     }
 }
 
