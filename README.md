@@ -31,6 +31,13 @@ The [US-only 3.1 beta](https://github.com/Zanehisako/wizard101-standalone/releas
 remains available. Developer ID, notarization, additional-Mac/oldest-macOS gameplay
 and a clean retained Arrival rebuild remain [signed-release gates](SHIPPING.md).
 
+## Regular vs. our version
+
+Side-by-side gameplay comparison: **regular version (left)** and
+**our Metal version (right)**.
+
+https://github.com/user-attachments/assets/83380add-3975-4477-8056-3c8e775764bb
+
 ## Feedback and support
 
 1. [Join our Discord server](https://discord.gg/b2KVmJ84P).
