@@ -248,6 +248,37 @@ struct Integrity {
 
 // Streams response chunks to disk; a cancelled transfer retains its partial file.
 final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate {
+    enum ProtocolFailure: String, LocalizedError {
+        case invalidResponse, invalidRange, oversizedBody, unacceptedResponse, unsafeRedirect, proxyAuthentication
+        var errorDescription: String? {
+            switch self {
+            case .invalidResponse: return "The download server returned an unsupported response."
+            case .invalidRange: return "Invalid resumed download response."
+            case .oversizedBody: return "A download exceeds its declared size."
+            case .unacceptedResponse: return "The download server returned no accepted response."
+            case .unsafeRedirect: return "The patch server redirected to an unsupported download address."
+            case .proxyAuthentication: return "The alternate download route requested proxy authentication."
+            }
+        }
+    }
+    struct Observation: Codable {
+        enum Outcome: String, Codable { case completed, cancelled, network, http, fileIO, invalidResponse, invalidRange, oversizedBody, unacceptedResponse, unsafeRedirect, proxyAuthentication, unavailable }
+        struct ByteRange: Codable { let start: UInt64; let end: UInt64 }
+        let requestedRange: ByteRange?
+        let expectedBytes: UInt64
+        let receivedBytes: UInt64
+        let stagedBytes: UInt64
+        let httpStatus: Int?
+        let networkCode: Int?
+        let outcome: Outcome
+        var valid: Bool {
+            expectedBytes > 0 && expectedBytes <= UInt64(UInt32.max)
+                && receivedBytes <= expectedBytes + 16 * 1024 * 1024 && stagedBytes <= expectedBytes
+                && (requestedRange.map { $0.start <= $0.end && $0.end < expectedBytes } ?? true)
+                && (httpStatus.map { (100...599).contains($0) } ?? true)
+                && (networkCode.map { (-4000 ... -1).contains($0) } ?? true)
+        }
+    }
     struct ServerFailure: LocalizedError {
         let status: Int
         var errorDescription: String? {
@@ -270,6 +301,9 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
     private var error: Error?
     private let completed = DispatchSemaphore(value: 0)
     private var accepted = false
+    private var requestStarted = false
+    private var receivedBytes: UInt64 = 0
+    private var httpStatus: Int?
     var testConfiguration: URLSessionConfiguration?
     private var routeAddress: String?
     init(url: URL, destination: URL, size: UInt64, token: CancellationToken, chunkSize: UInt64,
@@ -280,7 +314,7 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
     static func download(url: URL, to: URL, size: UInt64, token: CancellationToken, progress: @escaping (UInt64) -> Void,
                          testConfiguration: URLSessionConfiguration? = nil,
                          testRoutes: ((CancellationToken) throws -> [String])? = nil,
-                         testChunkSize: UInt64? = nil) throws {
+                         testChunkSize: UInt64? = nil, observer: ((Observation) -> Void)? = nil) throws {
         let chunkSize = testChunkSize ?? 8 * 1024 * 1024
         guard size > 0, chunkSize > 0, chunkSize <= 8 * 1024 * 1024 else {
             throw LauncherError.message("Invalid download size.")
@@ -294,21 +328,26 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
             guard ProcessInfo.processInfo.systemUptime < deadline else { throw NetworkFailure(code: -1001) }
             if try downloadRange(url: url, to: to, size: size, token: token, progress: progress,
                                  testConfiguration: testConfiguration, testRoutes: testRoutes,
-                                 chunkSize: chunkSize, deadline: deadline) { return }
+                                 chunkSize: chunkSize, deadline: deadline, observer: observer) { return }
         }
     }
     private static func downloadRange(url: URL, to: URL, size: UInt64, token: CancellationToken,
                                       progress: @escaping (UInt64) -> Void, testConfiguration: URLSessionConfiguration?,
                                       testRoutes: ((CancellationToken) throws -> [String])?,
-                                      chunkSize: UInt64, deadline: TimeInterval) throws -> Bool {
+                                      chunkSize: UInt64, deadline: TimeInterval, observer: ((Observation) -> Void)?) throws -> Bool {
         var lastFailure: NetworkFailure?
         for attempt in 0..<3 {
             try token.check()
             let transfer = HTTPTransfer(url: url, destination: to, size: size, token: token,
                                         chunkSize: chunkSize, deadline: deadline, progress: progress)
             transfer.testConfiguration = testConfiguration
-            do { try transfer.run(); return transfer.written == size }
+            do { try transfer.runObserved(observer); return transfer.written == size }
             catch let failure as NetworkFailure where [-1001, -1004, -1005, -1009].contains(failure.code) {
+                guard ProcessInfo.processInfo.systemUptime < deadline else { throw failure }
+                // Count stalled requests, not successful progress, against the
+                // retry budget. The outer loop still enforces cancellation and
+                // the shared deadline; callers must verify the complete CRC.
+                if transfer.accepted && transfer.written > transfer.offset { return transfer.written == size }
                 lastFailure = failure
                 // Resume only transient network failures. Invalid paths, ranges,
                 // sizes and integrity errors remain visible without retry.
@@ -321,7 +360,7 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
         // Preserve proxy/security routing. A failing CDN edge can be replaced
         // only for this public official HTTP request, never system-wide.
         guard testRoutes != nil || (testConfiguration == nil && CDNRoute.available(url)) else { throw lastFailure }
-        var attempted = Set<String>()
+        var attempted = Set<String>(), progressedAlternate = false
         for _ in 0..<2 {
             try token.check()
             if testRoutes == nil && !CDNRoute.available(url) { throw lastFailure }
@@ -337,10 +376,34 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
             let transfer = HTTPTransfer(url: url, destination: to, size: size, token: token,
                                         chunkSize: chunkSize, deadline: deadline, progress: progress)
             transfer.testConfiguration = testConfiguration; transfer.routeAddress = address
-            do { try transfer.run(); return transfer.written == size }
-            catch let failure as NetworkFailure where [-1001, -1004, -1005, -1009].contains(failure.code) { lastFailure = failure }
+            do { try transfer.runObserved(observer); return transfer.written == size }
+            catch let failure as NetworkFailure where [-1001, -1004, -1005, -1009].contains(failure.code) {
+                guard ProcessInfo.processInfo.systemUptime < deadline else { throw failure }
+                if transfer.accepted && transfer.written > transfer.offset {
+                    if transfer.written == size { return true }
+                    progressedAlternate = true
+                }
+                lastFailure = failure
+            }
         }
+        if progressedAlternate { return false }
         throw lastFailure
+    }
+    private func runObserved(_ observer: ((Observation) -> Void)?) throws {
+        func record(_ failure: Error?) {
+            let outcome: Observation.Outcome
+            if failure == nil { outcome = .completed }
+            else if failure is CancellationError { outcome = .cancelled }
+            else if failure is NetworkFailure { outcome = .network }
+            else if failure is ServerFailure { outcome = .http }
+            else if let failure = failure as? ProtocolFailure { outcome = Observation.Outcome(rawValue: failure.rawValue) ?? .unavailable }
+            else if let failure = failure as NSError?, [NSCocoaErrorDomain, NSPOSIXErrorDomain].contains(failure.domain) { outcome = .fileIO }
+            else { outcome = .unavailable }
+            observer?(Observation(requestedRange: requestStarted ? .init(start: offset, end: rangeEnd) : nil,
+                expectedBytes: expected, receivedBytes: receivedBytes, stagedBytes: written, httpStatus: httpStatus,
+                networkCode: (failure as? NetworkFailure)?.code, outcome: outcome))
+        }
+        do { try run(); record(nil) } catch { record(error); throw error }
     }
     private func run() throws {
         guard ProcessInfo.processInfo.systemUptime < deadline else { throw NetworkFailure(code: -1001) }
@@ -348,14 +411,15 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
         if let attributes = try? fm.attributesOfItem(atPath: destination.path) {
             guard attributes[.type] as? FileAttributeType == .typeRegular else { throw LauncherError.message("Unsafe staged download path.") }
             offset = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
-        } else {
+            if offset >= expected { try RejectedStaging.preserve(destination); offset = 0 }
+        }
+        if !fm.fileExists(atPath: destination.path) {
             guard fm.createFile(atPath: destination.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
                 throw LauncherError.message("Could not create a staged download.")
             }
         }
         file = try FileHandle(forWritingTo: destination)
         defer { try? file?.close() }
-        if offset >= expected { try file?.truncate(atOffset: 0); offset = 0 }
         rangeEnd = offset + min(chunkSize, expected - offset) - 1
         responseEnd = rangeEnd
         written = offset; try file?.seek(toOffset: offset)
@@ -374,6 +438,7 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
         request.setValue("Wizard101-Native/2", forHTTPHeaderField: "User-Agent")
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         request.setValue("bytes=\(offset)-\(rangeEnd)", forHTTPHeaderField: "Range")
+        requestStarted = true
         let task = session.dataTask(with: request); task.resume()
         while completed.wait(timeout: .now() + 0.1) == .timedOut {
             if token.isCancelled { task.cancel() }
@@ -382,23 +447,24 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
         try token.check()
         guard ProcessInfo.processInfo.systemUptime < deadline else { throw NetworkFailure(code: -1001) }
         if let error { throw error }
-        guard accepted else { throw LauncherError.message("The download server returned no accepted response.") }
+        guard accepted else { throw ProtocolFailure.unacceptedResponse }
         guard written == responseEnd + 1 else { throw NetworkFailure(code: -1005) }
         try file?.synchronize()
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         do {
+            httpStatus = (response as? HTTPURLResponse)?.statusCode
             guard let http = response as? HTTPURLResponse,
                   let responseURL = response.url, try PatchManifest.safeURL(responseURL.absoluteString) == responseURL else {
-                throw LauncherError.message("The download server returned an unsupported response.")
+                throw ProtocolFailure.invalidResponse
             }
             guard [200,206].contains(http.statusCode) else { throw ServerFailure(status: http.statusCode) }
             if http.statusCode == 206 {
                 let value = http.value(forHTTPHeaderField: "Content-Range") ?? ""
                 let parts = value.replacingOccurrences(of: "bytes ", with: "").split(whereSeparator: { $0 == "-" || $0 == "/" })
                 guard expected > 0, parts.count == 3, UInt64(parts[0]) == offset, UInt64(parts[2]) == expected,
-                      UInt64(parts[1]) == rangeEnd else { throw LauncherError.message("Invalid resumed download response.") }
+                      UInt64(parts[1]) == rangeEnd else { throw ProtocolFailure.invalidRange }
             } else {
                 // A server may ignore Range and return the complete file.
                 responseEnd = expected - 1
@@ -409,9 +475,10 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         do {
+            receivedBytes += UInt64(data.count)
             try token.check()
             let limit = responseEnd + 1
-            guard accepted, written <= limit, UInt64(data.count) <= limit - written else { throw LauncherError.message("A download exceeds its declared size.") }
+            guard accepted, written <= limit, UInt64(data.count) <= limit - written else { throw ProtocolFailure.oversizedBody }
             try file?.write(contentsOf: data); written += UInt64(data.count); progress(written)
         } catch { self.error = error; dataTask.cancel() }
     }
@@ -425,17 +492,17 @@ final class HTTPTransfer: NSObject, URLSessionDataDelegate, URLSessionTaskDelega
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         if routeAddress != nil {
-            error = LauncherError.message("The alternate download route redirected the resource."); completionHandler(nil); return
+            error = ProtocolFailure.unsafeRedirect; completionHandler(nil); return
         }
         guard let url = request.url, (try? PatchManifest.safeURL(url.absoluteString)) != nil else {
-            error = LauncherError.message("The patch server redirected to an unsupported host."); completionHandler(nil); return
+            error = ProtocolFailure.unsafeRedirect; completionHandler(nil); return
         }
         completionHandler(request)
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         if routeAddress != nil && challenge.protectionSpace.isProxy() {
-            error = LauncherError.message("The alternate download route requested proxy authentication.")
+            error = ProtocolFailure.proxyAuthentication
             completionHandler(.cancelAuthenticationChallenge, nil)
         } else { completionHandler(.performDefaultHandling, nil) }
     }

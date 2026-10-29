@@ -14,6 +14,7 @@ struct LaunchPlan: Sendable {
     var warmup: Bool = false
     var session: GameSession? = nil
     var provider: AccountProvider = .us
+    var contentPreparation: ContentPreparation? = nil
     var renderingCandidate: Bool = Bundle.main.object(forInfoDictionaryKey: "W101RenderingPerformanceCandidate") as? Bool ?? false
     var workloadDiagnostics: Bool = Bundle.main.object(forInfoDictionaryKey: "W101WorkloadDiagnostics") as? Bool ?? false
     var workloadPerformance: Bool = Bundle.main.object(forInfoDictionaryKey: "W101WorkloadPerformanceCandidate") as? Bool ?? false

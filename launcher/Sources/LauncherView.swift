@@ -337,7 +337,17 @@ private struct SettingsView: View {
                                    help: "Remove the remembered password from Mac Keychain.", run: model.forgetPassword)
                             Divider().overlay(ink.opacity(0.1)).padding(.vertical, 10)
                             action("Save Diagnostic Report", symbol: "doc.text", disabled: model.savingReport,
-                                   help: "Save safe local troubleshooting details.", run: model.saveDiagnosticReport)
+                                   help: "Create a shareable ZIP and select it in Finder.", run: model.saveDiagnosticReport)
+                            Text("Creates one ZIP you can attach to a support message.")
+                                .font(.system(size: 11)).foregroundColor(ink.opacity(0.7))
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+                            HStack(spacing: 16) {
+                                Button("Show Reports", action: model.showDiagnosticReports)
+                                    .help("Find saved diagnostic ZIP files in Finder.")
+                                Button("Share Latest Report…", action: model.shareDiagnosticReport)
+                                    .disabled(model.savingReport || model.latestDiagnosticReport == nil)
+                                    .help("Choose where to share the latest ZIP.")
+                            }.font(.system(size: 11)).padding(.top, 10)
                             if let summary = model.reportSummary {
                                 Text(summary).font(.system(size: 11)).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
                             }

@@ -40,6 +40,7 @@ final class LauncherModel: ObservableObject {
     @Published private(set) var recovering = false
     @Published private(set) var savingReport = false
     @Published var reportSummary: String?
+    @Published private(set) var latestDiagnosticReport: URL?
     @Published var canCancel = false
     @Published var status = "Checking your installation…"
     @Published var detail = ""
@@ -61,6 +62,7 @@ final class LauncherModel: ObservableObject {
     private var scanning = false
     private var changingProvider = false
     private var handoffStarted = false
+    private var diagnosticSharingPicker: NSSharingServicePicker?
     lazy var reliability = ReliabilityDiagnostics(state: state)
     var canForceQuit: Bool { gameActivity != .idle && token == nil && !recovering && operationLock == nil }
     private var keychain: PasswordStore { PasswordStore(service: provider.keychainService) }
@@ -75,6 +77,7 @@ final class LauncherModel: ObservableObject {
 
     init(paths: PortablePaths) {
         self.paths = paths
+        latestDiagnosticReport = DiagnosticExports(paths: paths).latest()
         if let readiness = ContentReadiness.load(state: paths.state) { contentSummary = readiness.summary }
         if combinedOptimizations { optimizations = .load() }
         if Bundle.main.object(forInfoDictionaryKey: "W101WorkloadDiagnostics") as? Bool == true { profile = false; warmup = false }
@@ -235,6 +238,7 @@ final class LauncherModel: ObservableObject {
         let preparation: ContentPreparation = checkOnly ? .visuals : contentRecovery.preparationForPlay()
         let account = username.trimmingCharacters(in: .whitespacesAndNewlines), secret = password, save = savePassword, selectedProvider = provider
         var selected = plan
+        selected.contentPreparation = preparation
         let directory = state, keychain = keychain, reliability = reliability
         let diagnostics = Bundle.main.object(forInfoDictionaryKey: "W101AuthenticationDiagnostics") as? Bool == true
             ? AuthenticationDiagnostics(url: directory.appendingPathComponent("AuthenticationFailure.json")) : nil
@@ -389,21 +393,42 @@ final class LauncherModel: ObservableObject {
     }
     func saveDiagnosticReport() {
         guard !savingReport else { return }
-        let panel = NSSavePanel(); panel.nameFieldStringValue = "Wizard101-Diagnostic-Report.json"
-        panel.message = "Save Mac details, component hashes, graphics settings and safe failure counters."
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
-        savingReport = true; reportSummary = "Saving report…"
+        savingReport = true; reportSummary = "Collecting a shareable ZIP…"
         let report = DiagnosticReport(paths: paths, mode: mode, diagnostics: reliability)
+        let exports = DiagnosticExports(paths: paths)
         DispatchQueue.global(qos: .utility).async {
-            let result = Result { try report.save(to: destination) }
+            let result = Result { try exports.save(report) }
             DispatchQueue.main.async {
                 self.savingReport = false
                 switch result {
-                case .success: self.reportSummary = "Diagnostic report saved."
-                case .failure: self.reportSummary = "Couldn’t save the report. Choose another location and retry."
+                case .success(let file):
+                    self.latestDiagnosticReport = file
+                    self.reportSummary = "Ready to share. The ZIP is selected in Finder."
+                    NSWorkspace.shared.activateFileViewerSelecting([file])
+                case .failure: self.reportSummary = "Couldn’t save the ZIP. Try again."
                 }
             }
         }
+    }
+    func showDiagnosticReports() {
+        do {
+            let exports = DiagnosticExports(paths: paths), folder = try exports.prepareDirectory()
+            latestDiagnosticReport = exports.latest()
+            if let file = latestDiagnosticReport { NSWorkspace.shared.activateFileViewerSelecting([file]) }
+            else { NSWorkspace.shared.open(folder) }
+        } catch { reportSummary = "Couldn’t open the reports folder." }
+    }
+    func shareDiagnosticReport() {
+        latestDiagnosticReport = DiagnosticExports(paths: paths).latest()
+        guard let file = latestDiagnosticReport else {
+            reportSummary = "Save a diagnostic report first."; return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow?.attachedSheet ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }),
+              let view = window.contentView else { reportSummary = "Open the launcher window to share the ZIP."; return }
+        window.makeKeyAndOrderFront(nil)
+        let picker = NSSharingServicePicker(items: [file]); diagnosticSharingPicker = picker
+        picker.show(relativeTo: NSRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1), of: view, preferredEdge: .minY)
     }
 }
 

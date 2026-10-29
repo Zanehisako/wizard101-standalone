@@ -33,6 +33,7 @@ struct LaunchDiagnosticSnapshot: Codable {
     let frameMode: FrameMode
     let renderer: RendererConfiguration
     let settings: [String: [String: String]]
+    let contentPreparation: ContentPreparation?
     static func validRunID(_ id: String) -> Bool {
         id.hasPrefix("native-") && id.count == 43 && UUID(uuidString: String(id.dropFirst(7))) != nil
     }
@@ -41,11 +42,12 @@ struct LaunchDiagnosticSnapshot: Codable {
               run.deletingLastPathComponent().standardizedFileURL == plan.paths.prefix.appendingPathComponent("drive_c/NativeLogs").standardizedFileURL else {
             throw LauncherError.message("Invalid launch diagnostic location.")
         }
-        let value = Self(schema: 1, runID: run.lastPathComponent,
+        let value = Self(schema: 2, runID: run.lastPathComponent,
                          startedUTC: ISO8601DateFormatter().string(from: Date()),
                          version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unavailable",
                          build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unavailable",
-                         frameMode: plan.mode, renderer: RendererConfiguration(plan: plan), settings: DiagnosticReport.gameSettings(paths: plan.paths))
+                         frameMode: plan.mode, renderer: RendererConfiguration(plan: plan), settings: DiagnosticReport.gameSettings(paths: plan.paths),
+                         contentPreparation: plan.contentPreparation)
         try FileManager.default.createDirectory(at: plan.paths.state, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let url = plan.paths.state.appendingPathComponent("LastLaunch.json")
         try JSONEncoder().encode(value).write(to: url, options: .atomic)
@@ -53,7 +55,7 @@ struct LaunchDiagnosticSnapshot: Codable {
     }
     static func load(state: URL) -> Self? {
         guard let bytes = try? Data(contentsOf: state.appendingPathComponent("LastLaunch.json")), bytes.count <= 65536,
-              let value = try? JSONDecoder().decode(Self.self, from: bytes), value.schema == 1, validRunID(value.runID),
+              let value = try? JSONDecoder().decode(Self.self, from: bytes), [1, 2].contains(value.schema), validRunID(value.runID),
               value.startedUTC.count <= 32, ISO8601DateFormatter().date(from: value.startedUTC) != nil,
               [value.version, value.build].allSatisfy({ $0 == "unavailable" || $0.range(of: "^[0-9.]{1,16}$", options: .regularExpression) != nil }),
               value.renderer.valid, value.settings.count <= 2,

@@ -292,6 +292,7 @@ final class NativePatcher: Sendable {
     private let gameplayClosed: @Sendable () throws -> Void
     private let availableBytes: @Sendable (URL) throws -> UInt64
     private let transferConfiguration: URLSessionConfiguration?
+    private let diagnostics: PatchDiagnostics
     init(base: URL, state: URL, token: CancellationToken, report: @escaping @Sendable (PatchProgress) -> Void,
          manifestLoader: @escaping @Sendable (CancellationToken, URL) throws -> PatchManifest = { try PatchManifest.fetch(token: $0, staging: $1) },
          gameplayClosed: @escaping @Sendable () throws -> Void = { try NativePatcher.requireClosed() },
@@ -300,6 +301,7 @@ final class NativePatcher: Sendable {
         self.base = base; self.state = state; self.token = token; self.report = report
         self.manifestLoader = manifestLoader; self.gameplayClosed = gameplayClosed
         self.availableBytes = availableBytes; self.transferConfiguration = transferConfiguration
+        self.diagnostics = PatchDiagnostics(state: state)
     }
     static func requireClosed() throws {
         guard try GameActivity.scan() == .idle else { throw LauncherError.message("Close Wizard101 and its official launcher before updating. Your game was left running.") }
@@ -342,7 +344,7 @@ final class NativePatcher: Sendable {
         let reserve: UInt64 = 512 * 1024 * 1024
         return free > reserve && additionalStagingBytes(records, state: state, headerBootstraps: headerBootstraps, token: token) < free - reserve
     }
-    private func archiveHeader(_ record: PatchRecord, prefix: URL, target: URL, progress: @escaping (UInt64) -> Void) throws -> URL {
+    private func archiveHeader(_ record: PatchRecord, prefix: URL, target: URL, context: PatchDiagnostics.Context?, progress: @escaping (UInt64) -> Void) throws -> URL {
         let installation = SafeInstallation(base: state)
         let header = try installation.file(target.lastPathComponent + ".header")
         let wire = try installation.file(target.lastPathComponent + ".hdr.gz")
@@ -350,7 +352,8 @@ final class NativePatcher: Sendable {
             let wireSize = (try? FileManager.default.attributesOfItem(atPath: wire.path))?[.size] as? NSNumber
             if wireSize?.uint64Value != record.compressedHeaderSize {
                 try HTTPTransfer.download(url: prefix.appendingPathComponent(record.source + ".hdr.gz"), to: wire,
-                                          size: record.compressedHeaderSize, token: token, progress: progress, testConfiguration: transferConfiguration)
+                                          size: record.compressedHeaderSize, token: token, progress: progress, testConfiguration: transferConfiguration,
+                                          observer: { self.diagnostics.record(context, phase: .archiveHeader, transfer: $0) })
             }
             let result = w101_gunzip_file(wire.path, header.path, record.headerSize, { context in
                 guard let context else { return 1 }
@@ -358,10 +361,12 @@ final class NativePatcher: Sendable {
             }, Unmanaged.passUnretained(token).toOpaque())
             try token.check()
             guard result == 0, Integrity.matches(header, size: record.headerSize, crc: record.headerCRC, token: token) else {
-                try? FileManager.default.removeItem(at: wire); try? FileManager.default.removeItem(at: header)
-                throw LauncherError.message("A streamed archive header failed validation. Retry to download it again.")
+                try token.check()
+                try RejectedStaging.preserve(wire); try RejectedStaging.preserve(header)
+                throw PatchValidationFailure.headerChecksum
             }
         }
+        diagnostics.verified(context, phase: .archiveHeader, .headerCRCVerified)
         return header
     }
     func run(apply: Bool, preparation: ContentPreparation = .startup, installPreparedVisuals: Bool = false) throws -> PatchResult {
@@ -377,6 +382,7 @@ final class NativePatcher: Sendable {
         }
         report(PatchProgress(phase: "Checking updates…", detail: "Querying the US Windows patch server.", fraction: nil))
         let manifest = try manifestLoader(token, state)
+        diagnostics.manifest(manifest)
         if preparation == .visuals && !manifest.records.contains(where: { $0.visualArchive }) {
             throw LauncherError.message("The official manifest contains no visual archives. Try again.")
         }
@@ -426,6 +432,9 @@ final class NativePatcher: Sendable {
         guard Self.hasStagingSpace(needed, state: state, free: free, headerBootstraps: inventory.headerBootstraps, token: token) else { throw LauncherError.message("There is not enough free space to stage this update.") }
         for record in needed {
             queue.addOperation {
+                let context = PatchDiagnostics.Context.make(record: record, revision: manifest.revision, preparation: preparation)
+                defer { self.diagnostics.finish(context) }
+                var phase: PatchDiagnostics.Phase = record.type == 4 ? .compressedBody : .archiveBody
                 do {
                     try self.token.check()
                     let name = Self.stagingName(record)
@@ -436,8 +445,10 @@ final class NativePatcher: Sendable {
                         self.report(PatchProgress(phase: preparation == .visuals ? "Preparing game visuals…" : "Downloading updates…", detail: "\(ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)) downloaded · \(verified) of \(needed.count) files verified", fraction: total == 0 ? 1 : Double(count) / Double(total)))
                     }
                     if inventory.headerBootstraps.contains(record.localPath) {
+                        phase = .archiveHeader
                         if !Integrity.matchesHeader(target, size: record.size, headerSize: record.headerSize, headerCRC: record.headerCRC, token: self.token) {
-                            let header = try self.archiveHeader(record, prefix: manifest.prefix, target: target, progress: downloadProgress)
+                            phase = .archiveHeader
+                            let header = try self.archiveHeader(record, prefix: manifest.prefix, target: target, context: context, progress: downloadProgress)
                             try InitialArchive.stage(header: header, destination: target, record: record, token: self.token)
                         }
                     } else if !Integrity.matches(target, size: record.size, crc: record.crc, token: self.token) {
@@ -447,10 +458,14 @@ final class NativePatcher: Sendable {
                         let wireComplete = record.type == 4 && (try? wireTarget.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])).map { $0.isRegularFile == true && UInt64($0.fileSize ?? 0) == record.downloadSize } == true
                         if !wireComplete {
                             if ArchivePrefix.required(record: record, destination: target) {
-                                let header = try self.archiveHeader(record, prefix: manifest.prefix, target: target, progress: downloadProgress)
+                                phase = .archiveHeader
+                                let header = try self.archiveHeader(record, prefix: manifest.prefix, target: target, context: context, progress: downloadProgress)
                                 try ArchivePrefix.stage(header: header, destination: target, record: record, token: self.token)
                             }
-                            try HTTPTransfer.download(url: source, to: wireTarget, size: record.downloadSize, token: self.token, progress: downloadProgress, testConfiguration: self.transferConfiguration)
+                            phase = record.type == 4 ? .compressedBody : .archiveBody
+                            let transferPhase = phase
+                            try HTTPTransfer.download(url: source, to: wireTarget, size: record.downloadSize, token: self.token, progress: downloadProgress,
+                                testConfiguration: self.transferConfiguration, observer: { self.diagnostics.record(context, phase: transferPhase, transfer: $0) })
                         }
                         if record.type == 4 {
                             let result = w101_gunzip_file(wireTarget.path, target.path, record.size, { context in
@@ -459,19 +474,22 @@ final class NativePatcher: Sendable {
                             }, Unmanaged.passUnretained(self.token).toOpaque())
                             try self.token.check()
                             if result != 0 {
-                                try? FileManager.default.removeItem(at: wireTarget)
-                                throw LauncherError.message("A compressed download failed validation. Retry to download it again.")
+                                try RejectedStaging.preserve(wireTarget); try RejectedStaging.preserve(target)
+                                throw PatchValidationFailure.decompression
                             }
                         }
                         guard Integrity.matches(target, size: record.size, crc: record.crc, token: self.token) else {
-                            try? FileManager.default.removeItem(at: target)
-                            if record.type == 4 { try? FileManager.default.removeItem(at: wireTarget) }
-                            throw LauncherError.message("A download failed its checksum. Retry to download it again.")
+                            try self.token.check()
+                            try RejectedStaging.preserve(target)
+                            if record.type == 4 { try RejectedStaging.preserve(wireTarget) }
+                            throw PatchValidationFailure.checksum
                         }
                     }
+                    self.diagnostics.verified(context, phase: phase, inventory.headerBootstraps.contains(record.localPath) ? .headerCRCVerified : .fullCRCVerified)
                     lock.lock(); counts[record.localPath] = inventory.headerBootstraps.contains(record.localPath) ? record.compressedHeaderSize : record.downloadSize; staged.append((record, target)); lock.unlock()
                 } catch {
                     lock.lock()
+                    self.diagnostics.failed(context, phase: phase, error: error, primary: failure == nil)
                     if failure == nil {
                         let existingValid = preparation == .visuals && record.type == 5 && record.visualArchive
                             && Integrity.matchesHeader(self.base.appendingPathComponent(record.localPath), size: record.size,
@@ -532,6 +550,7 @@ enum ArchivePrefix {
         try token.check()
         // A CRC-verified prefix is useful progress, never a completed archive.
         // Atomically replace only staging; the installed file is untouched.
+        try RejectedStaging.preserve(destination)
         guard rename(header.path, destination.path) == 0 else { throw LauncherError.message("Unable to stage an archive download prefix.") }
         let fd = open(destination.deletingLastPathComponent().path, O_RDONLY); if fd >= 0 { _ = fsync(fd); close(fd) }
     }
@@ -543,6 +562,7 @@ enum InitialArchive {
         guard record.type == 5, record.streamedArchive, Integrity.matches(header, size: record.headerSize, crc: record.headerCRC, token: token) else {
             throw LauncherError.message("Invalid initial streamed archive header.")
         }
+        try RejectedStaging.preserve(destination)
         let descriptor = open(destination.path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0o600)
         guard descriptor >= 0 else { throw LauncherError.message("Unable to stage an initial archive.") }
         let target = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)

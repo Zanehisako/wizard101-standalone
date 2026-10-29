@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a separate diagnostic candidate from 3.2 build 8; never a replacement release."""
+"""Build a separate diagnostic candidate from retained 3.2 build 8 or build 15."""
 import argparse
 import json
 from pathlib import Path
@@ -17,10 +17,11 @@ from reliability_qualification import GATES
 def candidate(base, output, launcher=None, build_number='14'):
     base, output = Path(base).resolve(), Path(output).resolve()
     info = plistlib.loads((base / 'Contents/Info.plist').read_bytes())
-    if (info.get('CFBundleShortVersionString'), info.get('CFBundleVersion')) != ('3.2', '8'):
-        raise ValueError('The reliability candidate requires the retained 3.2 build 8 app')
-    if not str(build_number).isdigit() or int(build_number) < 10:
-        raise ValueError('New reliability candidates start at build 10')
+    base_build = info.get('CFBundleVersion')
+    if info.get('CFBundleShortVersionString') != '3.2' or base_build not in ('8', '15'):
+        raise ValueError('The diagnostic candidate requires retained 3.2 build 8 or build 15')
+    if not str(build_number).isdigit() or int(build_number) < max(10, int(base_build) + 1):
+        raise ValueError('A diagnostic candidate must have a newer build number than its retained base')
     if output.exists() or output == base or base in output.parents or output.parent == Path('/Applications'):
         raise ValueError('Use a fresh local candidate path; installed apps and prior candidates are retained')
     before = components(base)
@@ -34,6 +35,9 @@ def candidate(base, output, launcher=None, build_number='14'):
         updated.update(CFBundleName='Wizard101 Reliability Candidate',
                        CFBundleDisplayName='Wizard101 Reliability Candidate', CFBundleVersion=str(build_number),
                        W101ReliabilityCandidate=True, W101DistributionChannel='local-diagnostic-candidate')
+        if base_build == '15':
+            updated.update(CFBundleName=f'Wizard101 Diagnostics Build {build_number}',
+                           CFBundleDisplayName=f'Wizard101 Diagnostics Build {build_number}')
         # Share the existing preference domain and prefix without migrating data.
         updated.pop('W101AuthenticationDiagnostics', None)
         plist.write_bytes(plistlib.dumps(updated, sort_keys=False))
@@ -46,7 +50,8 @@ def candidate(base, output, launcher=None, build_number='14'):
                 raise ValueError('Candidate changed a runtime or renderer component: ' + relative)
         if components(base) != before:
             raise ValueError('Retained base app changed during candidate build')
-        report = dict(candidate=True, base_version='3.2', base_build='8', build=str(build_number), visual_preload_default=True,
+        report = dict(candidate=True, base_version='3.2', base_build=base_build, build=str(build_number), visual_preload_default=True,
+                      diagnostic_report_schema=3, transfer_observation_limit=20,
                       optional_archive_streaming_recovery='explicit_single_attempt_after_optional_http_403_404_or_interrupted_verified_dynamic_archive',
                       self_tests_passed=result['passed'], public_release_ready=False,
                       installed_launcher_replaced=False, graphics_fix_verified=False, alt_tab_fix_verified=False,

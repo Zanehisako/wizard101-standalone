@@ -169,6 +169,32 @@ if arguments.contains("--patch-probe") || arguments.contains("--list-startup") {
         print(String(decoding: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self)); withExtendedLifetime(lock) {}; exit(0)
     } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
 }
+if arguments.contains("--audit-content") {
+    do {
+        let lock = try LauncherLock(directory: paths.state)
+        try NativePatcher.requireClosed()
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("w101-content-audit-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let token = CancellationToken(), manifest = try PatchManifest.fetch(token: token, staging: temporary)
+        var names = Set<String>()
+        for index in arguments.indices where arguments[index] == "--archive" {
+            guard index + 1 < arguments.count, URL(fileURLWithPath: arguments[index + 1]).lastPathComponent == arguments[index + 1],
+                  arguments[index + 1].lowercased().hasSuffix(".wad") else { throw LauncherError.message("Pass an archive filename after --archive.") }
+            names.insert(arguments[index + 1].lowercased())
+        }
+        let archives = manifest.records.map(PatchDiagnostics.Archive.init).filter { archive in
+            archive.valid && (names.isEmpty ? archive.relevantToNovus : names.contains(URL(fileURLWithPath: archive.path).lastPathComponent.lowercased()))
+        }
+        guard archives.count <= 256, !archives.isEmpty, names.isEmpty || archives.count == names.count else {
+            throw LauncherError.message("The requested archives are missing or ambiguous in the current manifest.")
+        }
+        let observation = PatchDiagnostics.Manifest(revision: manifest.revision, checkedUTC: ISO8601DateFormatter().string(from: Date()), archives: archives)
+        var report = ArchiveAudit.inspect(paths: paths, manifest: observation)
+        report["schema"] = 1; report["manifest_refreshed_for_audit"] = true
+        print(String(decoding: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self))
+        withExtendedLifetime(lock) {}; exit(0)
+    } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+}
 if arguments.contains("--check-updates") {
     do {
         let lock = try LauncherLock(directory: paths.state)

@@ -105,12 +105,21 @@ func runVisualContentTests(check: (Bool, String) throws -> Void,
     }
     try check((try Data(contentsOf: mobFile)) == sparse && ContentReadiness.load(state: paths.state)?.status == .incomplete,
               "Cancelled preload retains the installed archive and incomplete readiness")
+    try check(PatchDiagnostics(state: paths.state).snapshot().observations.contains { $0.verification == .cancelled }
+              && PatchDiagnostics(state: paths.state).snapshot().latestFailure == nil,
+              "Cancellation is recorded without inventing a checksum or network failure")
     let mobStage = paths.state.appendingPathComponent(NativePatcher.stagingName(mob))
     if fm.fileExists(atPath: mobStage.path) { try fm.removeItem(at: mobStage) }
     VisualFixtureHTTP.reset(corrupt: true)
     try rejects("Body corruption despite a valid archive header prevents visual installation") { _ = try patcher().run(apply: true, preparation: .visuals) }
     try check((try Data(contentsOf: mobFile)) == sparse && !fm.fileExists(atPath: paths.game.appendingPathComponent(visuals[0].localPath).path),
               "Failed visual CRC leaves every installed archive untouched")
+    let checksumFailure = PatchDiagnostics(state: paths.state).snapshot().latestFailure
+    try check(checksumFailure?.archive.path == mob.localPath && checksumFailure?.revision == manifest.revision
+              && checksumFailure?.preparation == .visuals && checksumFailure?.verification == .checksumFailed,
+              "The primary preload report binds a checksum failure to the archive, revision and full-preload scope")
+    try check(try fm.contentsOfDirectory(atPath: paths.state.path).contains { $0.hasPrefix(NativePatcher.stagingName(mob) + ".rejected-") },
+              "CRC-rejected archive bytes are preserved for diagnosis and rollback")
     let resume = paths.state.appendingPathComponent(NativePatcher.stagingName(visuals[0]))
     try Data(VisualFixtureHTTP.content.prefix(257)).write(to: resume)
     for status in [403, 404] {

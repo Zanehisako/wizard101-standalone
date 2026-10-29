@@ -152,7 +152,11 @@ struct DiagnosticReport {
             let size = try handle.seekToEnd(), limit: UInt64 = 2 * 1024 * 1024
             try handle.seek(toOffset: size > limit ? size - limit : 0)
             let bytes = try handle.read(upToCount: Int(limit)) ?? Data()
-            return (logCounts(bytes), ["available": true, "bytes_read": bytes.count, "truncated": size > limit])
+            var observation: [String: Any] = ["available": true, "bytes_read": bytes.count, "truncated": size > limit]
+            if let date = try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate {
+                observation["modified_utc"] = ISO8601DateFormatter().string(from: date)
+            }
+            return (logCounts(bytes), observation)
         } catch { return (nil, ["available": false]) }
     }
     func data() throws -> Data {
@@ -169,6 +173,7 @@ struct DiagnosticReport {
         let hashes = files.mapValues { Self.hash($0) ?? "unavailable" }
         let settings = Self.gameSettings(paths: paths)
         let launch = LaunchDiagnosticSnapshot.load(state: paths.state)
+        let patch = PatchDiagnostics(state: paths.state).snapshot()
         let run = Self.rendererRun(paths: paths, launch: launch)
         var logs: [String: Any] = [:]
         var sources: [String: Any] = [:]
@@ -183,7 +188,7 @@ struct DiagnosticReport {
         var plan = LaunchPlan(paths: paths, mode: mode, profile: false, environment: ProcessInfo.processInfo.environment)
         if Bundle.main.object(forInfoDictionaryKey: "W101CombinedOptimizations") as? Bool == true { plan.experimentSelections = OptimizationSettings.load().environment }
         func object<T: Encodable>(_ value: T) throws -> Any { try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) }
-        let report: [String: Any] = ["schema": 2, "candidate": Bundle.main.object(forInfoDictionaryKey: "W101ReliabilityCandidate") as? Bool ?? false,
+        let report: [String: Any] = ["schema": 3, "candidate": Bundle.main.object(forInfoDictionaryKey: "W101ReliabilityCandidate") as? Bool ?? false,
             "app_version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unavailable",
             "app_build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unavailable",
             "created_utc": ISO8601DateFormatter().string(from: Date()),
@@ -193,6 +198,8 @@ struct DiagnosticReport {
             "authentication": observations, "log_token_counts": logs, "log_sources": sources,
             "renderer_log_selection": launch != nil ? "recorded_launch" : run != nil ? "newest_legacy_run" : "unavailable",
             "last_launch": try launch.map { try object($0) } ?? ["available": false],
+            "launch_content_mode": launch?.contentPreparation.map { $0 == .visuals ? "full_visual_preload" : $0 == .startup ? "streaming_once" : "appearance_preload" } ?? "unavailable",
+            "patch": try object(patch), "archive_verification": ArchiveAudit.inspect(paths: paths, manifest: patch.manifest),
             "renderer_settings": try launch.map { try object($0.renderer) } ?? ["available": false],
             "next_launch_renderer_settings": try object(RendererConfiguration(plan: plan)),
             "content_readiness": try ContentReadiness.load(state: paths.state).map { try object($0) } ?? ["available": false],

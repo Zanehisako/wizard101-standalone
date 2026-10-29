@@ -1,5 +1,13 @@
 # 3.2 local reliability candidates
 
+## Build 16: progressing downloads and preload/Novus diagnostics
+
+See [DIAGNOSTIC-BUILD16.md](DIAGNOSTIC-BUILD16.md) for the separate candidate
+based on retained build 15, the reproduced retry repair, report schema 3,
+read-only archive checks, tester capture sequence and rollback. Its runtime,
+renderer and graphics defaults remain unchanged. The tester's exact preload
+failure and Novus scene still require live evidence.
+
 ## Build 14: interrupted dynamic-archive recovery
 
 The current candidate is `dist/reliability-build14/Wizard101 Reliability Candidate.app`.

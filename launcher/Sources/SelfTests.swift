@@ -8,8 +8,10 @@ func runSelfTests() throws {
     try fm.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try? fm.removeItem(at: root) }
     var checks: [String] = []
+    let trace = ProcessInfo.processInfo.environment["W101_SELF_TEST_PROGRESS"] == "1"
     func check(_ condition: Bool, _ name: String) throws {
         guard condition else { throw LauncherError.message(name) }; checks.append(name)
+        if trace { fputs("\(name)\n", stderr) }
     }
     func rejects(_ name: String, _ body: () throws -> Void) throws {
         var rejected = false; do { try body() } catch { rejected = true }; try check(rejected, name)
@@ -19,6 +21,7 @@ func runSelfTests() throws {
     try runAuthenticationTests(check: check, rejects: rejects)
     try runReliabilityTests(check: check, rejects: rejects)
     try runVisualContentTests(check: check, rejects: rejects)
+    try runPatchDiagnosticTests(check: check, rejects: rejects)
     let presentationSuite = "org.wizard101native.presentation.test." + UUID().uuidString
     let presentationDefaults = UserDefaults(suiteName: presentationSuite)!
     defer { presentationDefaults.removePersistentDomain(forName: presentationSuite) }
