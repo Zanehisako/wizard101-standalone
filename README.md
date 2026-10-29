@@ -11,7 +11,13 @@ and optional animated effects.
 > Discord is our main contact for bug reports, questions and suggestions.
 > [How to reach us](#feedback-and-support).
 
-**Latest: [3.2 beta 2 — sign-in and content recovery](https://github.com/Zanehisako/wizard101-standalone/releases/tag/v3.2-community-beta.2).**
+**Latest diagnostic release: [3.2 beta 3 — Build 16](https://github.com/Zanehisako/wizard101-standalone/releases/tag/v3.2-community-beta.3).**
+[Download the diagnostic app ZIP](https://github.com/Zanehisako/wizard101-standalone/releases/download/v3.2-community-beta.3/Wizard101-Diagnostics-Build16.zip)
+and follow **[How to use it and send us your logs](README-LOGS.md)**.
+Build 16 adds a preload retry repair and report ZIPs you can save, find and share
+from Settings. Novus rendering remains under investigation.
+
+**[3.2 beta 2 — build 15 installer](https://github.com/Zanehisako/wizard101-standalone/releases/tag/v3.2-community-beta.2)** remains available.
 [Download the complete installer](https://github.com/Zanehisako/wizard101-standalone/releases/download/v3.2-community-beta.2/Wizard101-AppleSilicon-community-beta.pkg),
 then choose **US / Steam**. Both providers share installed content and settings;
 saved accounts and Keychain passwords are separate. The owner confirmed Steam
@@ -45,6 +51,9 @@ https://github.com/user-attachments/assets/83380add-3975-4477-8056-3c8e775764bb
 
 For a bug, include the app version, your Mac/macOS, **US or Steam**, and what
 happened. Reproduction steps and a screenshot help. Thank you for helping improve the project!
+
+**Using build 16? [Save a report ZIP and send it to us on Discord](README-LOGS.md).**
+The guide includes the Settings buttons, report folder and a message template.
 
 ## Choose your setup path
 
@@ -158,6 +167,9 @@ The gear opens Settings:
 | 60 FPS / Uncapped | Saves the launch frame-rate choice. 60 FPS and legacy pacing are the defaults; display/VSync settings may still limit uncapped play. |
 | Check game updates | Shows checking/completion feedback. Checks without applying files; pending content installs before the next Play. |
 | Forget saved password | Removes the remembered Keychain password for the entered account. |
+| Save Diagnostic Report (build 16) | Creates a report ZIP and selects it in Finder. |
+| Show Reports (build 16) | Finds saved report ZIPs. |
+| Share Latest Report… (build 16) | Opens the Mac sharing menu for the latest report ZIP. |
 | Advanced | Holds optional performance controls, shader preparation where available, diagnostics and launch details. |
 
 Set resolution, fullscreen, graphics and gameplay options inside Wizard101.

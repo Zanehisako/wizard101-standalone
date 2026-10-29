@@ -37,7 +37,7 @@ FILES += ['ACCOUNTS.md', 'account_qualification.py', 'install_account_candidate.
 FILES += ['RELIABILITY.md', 'reliability_qualification.py', 'build_reliability_candidate.py',
           'audit_reliability_content.py', 'verify_reliability_runtime.py']
 FILES += ['SUPPORT.md', '.github/ISSUE_TEMPLATE/config.yml']
-FILES += ['read_diagnostic_report.py', 'DIAGNOSTIC-BUILD16.md']
+FILES += ['read_diagnostic_report.py', 'DIAGNOSTIC-BUILD16.md', 'README-LOGS.md']
 DIRECTORIES += ['installer']
 ALLOWED = {'.swift', '.c', '.h', '.cpp', '.mm', '.metal', '.vert', '.frag', '.comp', '.py', '.md', '.json', '.txt', '.patch', '.S'}
 ALLOWED |= {'.html', '.svg'}
